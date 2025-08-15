@@ -68,7 +68,7 @@
       const j = await r.json();
       statePathEl.textContent = j.statePath || "n/a";
       sinceIdEl.textContent = j.sinceId || "(none yet)";
-    } catch (e) {
+    } catch {
       statePathEl.textContent = "error";
       sinceIdEl.textContent = "error";
     }
@@ -106,7 +106,7 @@
         const n = j.handled ?? 0;
         resultText.textContent = `Replied to ${n} mention(s). sinceId: ${j.lastId || "(unchanged)"}`;
       }
-    } catch (e) {
+    } catch {
       resultText.textContent = "Request failed. See server logs.";
     } finally {
       closePwModal();
