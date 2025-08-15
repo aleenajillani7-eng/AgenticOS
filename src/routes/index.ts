@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { tweetRouter } from "./tweet.route";
 import { mentionRouter } from "./mention.route";
 import scheduleRouter from "./schedule.routes";
-import webhookRouter from "./webhook.routes";   // ⬅️ ADD
+import webhookRouter from "./webhook.routes";
 import { authRouter } from "./auth.route";
 
 // VIEW routers
@@ -15,9 +15,9 @@ import dashboardRouter from "./dashboard.routes";
 // ---- API aggregator ----
 export const apiRouter = new Hono();
 apiRouter.route("/tweets", tweetRouter);
-apiRouter.route("/mentions", mentionRouter);
+apiRouter.route("/mentions", mentionRouter);   // ⬅️ ensure this line exists
 apiRouter.route("/schedule", scheduleRouter);
-apiRouter.route("/webhook", webhookRouter);     // ⬅️ ADD
+apiRouter.route("/webhook", webhookRouter);
 apiRouter.route("/auth", authRouter);
 
 // ---- VIEW aggregator ----
