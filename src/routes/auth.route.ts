@@ -28,12 +28,15 @@ authRouter.get("/callback", async (c) => {
   }
 });
 
-// ---- Diagnostics (no secrets) ----
+// -------- Diagnostics (no secrets) --------
+
+// File exists?
 authRouter.get("/status", (c) => {
   const present = existsSync(TOKENS_FILE_PATH);
   return c.json({ tokensPresent: present, path: TOKENS_FILE_PATH });
 });
 
+// Can decrypt with current ENCRYPTION_KEY?
 authRouter.get("/probe", async (c) => {
   try {
     const key = process.env.ENCRYPTION_KEY || "";
@@ -44,6 +47,7 @@ authRouter.get("/probe", async (c) => {
   }
 });
 
+// Is /data writable? Is key set? (detect missing disk or env)
 authRouter.get("/debug", (c) => {
   const dir = dirname(TOKENS_FILE_PATH);
   let canWrite = false;
@@ -63,17 +67,12 @@ authRouter.get("/debug", (c) => {
   });
 });
 
-// ---- Reset (dangerous) ----
-// GET variant for convenience. Requires confirm=DELETE to avoid accidents.
-// Example: /api/auth/reset?confirm=DELETE
+// Danger reset (deletes tokens file). Use: /api/auth/reset?confirm=DELETE
 authRouter.get("/reset", (c) => {
   const url = new URL(c.req.url);
   const confirm = url.searchParams.get("confirm");
   if (confirm !== "DELETE") {
-    return c.json(
-      { ok: false, error: "Add ?confirm=DELETE to reset tokens (destructive)" },
-      400
-    );
+    return c.json({ ok: false, error: "Add ?confirm=DELETE to reset tokens (destructive)" }, 400);
   }
   try {
     if (existsSync(TOKENS_FILE_PATH)) unlinkSync(TOKENS_FILE_PATH);
