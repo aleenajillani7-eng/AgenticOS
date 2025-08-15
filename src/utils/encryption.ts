@@ -15,7 +15,7 @@ export type TwitterTokens = {
   created_at: number;
 };
 
-// ---------- path selection helpers ----------
+// ---------- stable path resolution (absolute) ----------
 function isDirWritable(dir: string): boolean {
   try {
     mkdirSync(dir, { recursive: true });
@@ -28,21 +28,27 @@ function isDirWritable(dir: string): boolean {
   }
 }
 
-function resolveTokensPath(): string {
-  // 1) Explicit env wins
-  const fromEnv = process.env.TOKENS_FILE_PATH;
-  if (fromEnv) return fromEnv;
+// project root = two levels up from this file: src/utils → (..) → src → (..) → repo root
+const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 
-  // 2) Prefer Render disk (/data) if writable
+function resolveTokensPath(): string {
+  const fromEnv = process.env.TOKENS_FILE_PATH;
+  if (fromEnv) {
+    // Make env relative to project root if not absolute
+    const abs = path.isAbsolute(fromEnv) ? fromEnv : path.join(REPO_ROOT, fromEnv);
+    return abs;
+  }
+
+  // Prefer Render disk (/data) if writable
   if (isDirWritable("/data")) return "/data/tokens.json";
 
-  // 3) Fallback to local repo data directory
-  const localDir = path.resolve("./data");
+  // Fallback to repo-local data directory
+  const localDir = path.join(REPO_ROOT, "data");
   mkdirSync(localDir, { recursive: true });
-  return join(localDir, "tokens.json");
+  return path.join(localDir, "tokens.json");
 }
 
-// Single source of truth for tokens location
+// Single source of truth (absolute path)
 export const TOKENS_FILE_PATH = resolveTokensPath();
 
 // Some parts of the code import this:
@@ -50,7 +56,7 @@ export function tokenAlreadyExists(): boolean {
   return existsSync(TOKENS_FILE_PATH);
 }
 
-// ---------- crypto ----------
+// ---------- crypto helpers ----------
 const te = new TextEncoder();
 const td = new TextDecoder();
 
