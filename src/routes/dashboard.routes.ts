@@ -8,6 +8,6 @@ const dashboardRouter = new Hono();
 
 dashboardRouter.get("/", ScheduleController.getSchedule);
 dashboardRouter.get("/live-news", renderLiveNews);
-dashboardRouter.get("/mentions", renderMentions);   // ⬅️ new page
+dashboardRouter.get("/mentions", renderMentions);  // <-- new page
 
 export default dashboardRouter;
