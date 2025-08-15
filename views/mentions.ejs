@@ -1,0 +1,124 @@
+<!-- views/mentions.ejs -->
+<div class="container mx-auto px-4 py-8">
+  <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+    <div class="flex items-center justify-between">
+      <h1 class="text-2xl font-bold text-gray-800">Mentions</h1>
+      <div class="flex items-center gap-2">
+        <button id="refreshStatus"
+          class="bg-gray-100 hover:bg-gray-200 text-gray-800 px-4 py-2 rounded-lg transition duration-200">
+          Refresh Status
+        </button>
+        <button id="runMentions"
+          class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition duration-200">
+          Reply to Mentions Now
+        </button>
+      </div>
+    </div>
+    <p class="text-gray-500 mt-2 text-sm">
+      This runs the mentions worker immediately (in addition to the scheduled poller).
+      Replies follow your TL;DRabbit persona: two lines, no links/hashtags.
+    </p>
+  </div>
+
+  <div class="bg-white rounded-lg shadow p-6">
+    <h2 class="text-lg font-semibold text-gray-800 mb-3">Status</h2>
+    <div id="statusBox" class="text-sm text-gray-700">
+      <div><span class="font-medium">State file:</span> <code id="statePath">loading…</code></div>
+      <div><span class="font-medium">Last sinceId:</span> <code id="sinceId">loading…</code></div>
+    </div>
+    <div id="resultBox" class="mt-4 hidden">
+      <div class="rounded-md bg-blue-50 p-3 text-blue-800" id="resultText"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Password Modal -->
+<div id="pwModal" class="fixed inset-0 bg-black/40 hidden">
+  <div class="bg-white w-full max-w-sm mx-auto mt-40 rounded-lg shadow-lg p-6">
+    <h3 class="text-lg font-semibold text-gray-800 mb-2">Confirm</h3>
+    <p class="text-sm text-gray-600 mb-4">Enter your password to run the mentions worker now.</p>
+    <input id="pwInput" type="password" class="w-full border rounded px-3 py-2"
+           placeholder="Password" />
+    <div class="flex justify-end gap-2 mt-4">
+      <button id="pwCancel" class="px-4 py-2 rounded bg-gray-100 hover:bg-gray-200">Cancel</button>
+      <button id="pwSubmit" class="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">
+        Run now
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const statusUrl = "/api/mentions/status";
+  const runUrl = "/api/mentions/run";
+
+  const sinceIdEl = document.getElementById("sinceId");
+  const statePathEl = document.getElementById("statePath");
+  const resultBox = document.getElementById("resultBox");
+  const resultText = document.getElementById("resultText");
+
+  const pwModal = document.getElementById("pwModal");
+  const pwInput = document.getElementById("pwInput");
+  const pwCancel = document.getElementById("pwCancel");
+  const pwSubmit = document.getElementById("pwSubmit");
+
+  async function loadStatus() {
+    try {
+      const r = await fetch(statusUrl);
+      const j = await r.json();
+      statePathEl.textContent = j.statePath || "n/a";
+      sinceIdEl.textContent = j.sinceId || "(none yet)";
+    } catch (e) {
+      statePathEl.textContent = "error";
+      sinceIdEl.textContent = "error";
+    }
+  }
+
+  function openPwModal() {
+    pwInput.value = "";
+    pwModal.classList.remove("hidden");
+    pwInput.focus();
+  }
+  function closePwModal() {
+    pwModal.classList.add("hidden");
+  }
+
+  async function runMentionsNow() {
+    const password = pwInput.value.trim();
+    if (!password) return;
+
+    try {
+      resultBox.classList.remove("hidden");
+      resultText.textContent = "Running…";
+
+      const r = await fetch(runUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${password}`,
+          "Content-Type": "application/json"
+        }
+      });
+      const j = await r.json();
+
+      if (!r.ok) {
+        resultText.textContent = `Error: ${j?.error || "failed"}`;
+      } else {
+        const n = j.handled ?? 0;
+        resultText.textContent = `Replied to ${n} mention(s). sinceId: ${j.lastId || "(unchanged)"}`;
+      }
+    } catch (e) {
+      resultText.textContent = "Request failed. See server logs.";
+    } finally {
+      closePwModal();
+      loadStatus();
+    }
+  }
+
+  document.getElementById("refreshStatus").addEventListener("click", loadStatus);
+  document.getElementById("runMentions").addEventListener("click", openPwModal);
+  pwCancel.addEventListener("click", closePwModal);
+  pwSubmit.addEventListener("click", runMentionsNow);
+
+  // initial
+  loadStatus();
+</script>
