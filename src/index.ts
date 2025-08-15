@@ -13,37 +13,28 @@ const app = new Hono();
 // Middleware
 app.use("*", logger());
 app.use("*", prettyJSON());
-app.use("/style.css", serveStatic({ root: "./public" }));
+
+// Serve static asset folders (update paths as needed for your build)
+app.use("/assets/*", serveStatic({ root: "./public" }));
+app.use("/static/*", serveStatic({ root: "./public" }));
 app.use("/images/*", serveStatic({ root: "./public" }));
+app.use("/favicon.ico", serveStatic({ root: "./public" }));
 
 // Health check
 app.get("/health", (c) => c.json({ ok: true }));
 
-// Home page at "/" — respond to GET, HEAD, etc.
-app.all("/", (c) =>
-  c.html(String.raw`<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>AgenticOS</title></head>
-  <body>
-    <h1>AgenticOS is running</h1>
-    <p>Health: <a href="/health">/health</a></p>
-    <p>API base: <code>/api</code></p>
-  </body>
-</html>`)
-);
-
-// API routes
+// Mount API first so it doesn't get swallowed by SPA fallback
 app.route("/api", apiRouter);
+
+// SPA fallback: serve index.html for any non-API route
+app.get("/", serveStatic({ path: "./public/index.html" }));
+app.get("/*", serveStatic({ path: "./public/index.html" }));
 
 // Error handler
 app.onError((err, c) => {
   console.error("Global Error Handler:", err);
   return c.json(
-    {
-      success: false,
-      message: "Internal Server Error",
-      error: (err as Error).message,
-    },
+    { success: false, message: "Internal Server Error", error: (err as Error).message },
     500
   );
 });
