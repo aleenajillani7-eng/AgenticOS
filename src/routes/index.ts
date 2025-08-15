@@ -19,3 +19,11 @@ apiRouter.route("/schedule", scheduleRouter);
 viewRouter.route("/", dashboardRouter);
 
 export { apiRouter, viewRouter };
+import { Hono } from "hono";
+import { authRouter } from "./auth.route"; // ADD THIS
+
+export const apiRouter = new Hono();
+
+// existing routes...
+apiRouter.route("/auth", authRouter); // ADD THIS
+
