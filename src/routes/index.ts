@@ -5,9 +5,10 @@ import { Hono } from "hono";
 import { tweetRouter } from "./tweet.route";
 import { mentionRouter } from "./mention.route";
 import scheduleRouter from "./schedule.routes";
+import webhookRouter from "./webhook.routes";   // ⬅️ ADD
 import { authRouter } from "./auth.route";
 
-// VIEW routers (default exports in your repo)
+// VIEW routers
 import loginRouter from "./login.routes";
 import dashboardRouter from "./dashboard.routes";
 
@@ -16,7 +17,8 @@ export const apiRouter = new Hono();
 apiRouter.route("/tweets", tweetRouter);
 apiRouter.route("/mentions", mentionRouter);
 apiRouter.route("/schedule", scheduleRouter);
-apiRouter.route("/auth", authRouter); // <-- ensures /api/auth/* exists
+apiRouter.route("/webhook", webhookRouter);     // ⬅️ ADD
+apiRouter.route("/auth", authRouter);
 
 // ---- VIEW aggregator ----
 export const viewRouter = new Hono();
