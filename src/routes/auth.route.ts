@@ -1,19 +1,17 @@
 // src/routes/auth.route.ts
 import { Hono } from "hono";
+import { existsSync } from "fs";
 import { getAuthUrl, handleCallback } from "../services/auth.service";
 
 export const authRouter = new Hono();
 
-// Step 1 — Redirect user to Twitter OAuth
-authRouter.get("/", (c) => {
-  const authUrl = getAuthUrl();
-  return c.redirect(authUrl);
-});
+const TOKENS_FILE_PATH = process.env.TOKENS_FILE_PATH ?? "/data/tokens.json";
 
-// Optional alias so /api/auth/login also works
+// Start OAuth (both /api/auth and /api/auth/login)
+authRouter.get("/", (c) => c.redirect(getAuthUrl()));
 authRouter.get("/login", (c) => c.redirect(getAuthUrl()));
 
-// Step 2 — Handle Twitter callback
+// OAuth callback — save tokens, but don't return them
 authRouter.get("/callback", async (c) => {
   try {
     const url = new URL(c.req.url);
@@ -21,18 +19,25 @@ authRouter.get("/callback", async (c) => {
     const state = url.searchParams.get("state");
 
     if (!code || !state) {
-      return c.json({ error: "Missing OAuth code/state" }, 400);
+      return c.json({ success: false, error: "Missing OAuth code/state" }, 400);
     }
 
-    const result = await handleCallback(code, state);
+    await handleCallback(code, state);
 
     return c.json({
       success: true,
       message: "Bot is now authorized to reply to mentions 🚀",
-      tokens: result,
     });
-  } catch (error: any) {
-    console.error("Auth callback error:", error);
-    return c.json({ error: error.message }, 500);
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Auth failed (unknown error)";
+    console.error("Auth callback error:", err);
+    return c.json({ success: false, error: message }, 500);
   }
+});
+
+// Simple status endpoint to confirm tokens file exists (no secrets returned)
+authRouter.get("/status", (c) => {
+  const present = existsSync(TOKENS_FILE_PATH);
+  return c.json({ tokensPresent: present });
 });
