@@ -63,7 +63,7 @@ authRouter.get("/debug", (c) => {
   });
 });
 
-// Reset tokens (dangerous)
+// Reset tokens (danger!)
 authRouter.get("/reset", (c) => {
   const url = new URL(c.req.url);
   const confirm = url.searchParams.get("confirm");
