@@ -14,21 +14,29 @@ const app = new Hono();
 app.use("*", logger());
 app.use("*", prettyJSON());
 
-// Serve static asset folders (update paths as needed for your build)
+// (Optional) static assets if you have a /public folder
 app.use("/assets/*", serveStatic({ root: "./public" }));
-app.use("/static/*", serveStatic({ root: "./public" }));
 app.use("/images/*", serveStatic({ root: "./public" }));
 app.use("/favicon.ico", serveStatic({ root: "./public" }));
 
 // Health check
 app.get("/health", (c) => c.json({ ok: true }));
 
-// Mount API first so it doesn't get swallowed by SPA fallback
+// Mount all API endpoints at /api (this includes /api/auth once you export it)
 app.route("/api", apiRouter);
 
-// SPA fallback: serve index.html for any non-API route
-app.get("/", serveStatic({ path: "./public/index.html" }));
-app.get("/*", serveStatic({ path: "./public/index.html" }));
+// Root page (responds to GET/HEAD)
+app.all("/", (c) =>
+  c.html(String.raw`<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>AgenticOS</title></head>
+  <body>
+    <h1>AgenticOS is running</h1>
+    <p>Health: <a href="/health">/health</a></p>
+    <p>API base: <code>/api</code></p>
+  </body>
+</html>`)
+);
 
 // Error handler
 app.onError((err, c) => {
@@ -44,7 +52,7 @@ const port = Number(env.PORT) || 3000;
 Bun.serve({ fetch: app.fetch, port });
 console.log(`🚀 Twitter AI Agent listening on port ${port}`);
 
-// Start tweet scheduler
+// Start tweet scheduler (keep your existing logic)
 try {
   scheduleTweets();
 } catch (error) {
