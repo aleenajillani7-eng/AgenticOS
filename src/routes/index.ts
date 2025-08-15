@@ -16,7 +16,7 @@ export const apiRouter = new Hono();
 apiRouter.route("/tweets", tweetRouter);
 apiRouter.route("/mentions", mentionRouter);
 apiRouter.route("/schedule", scheduleRouter);
-apiRouter.route("/auth", authRouter);
+apiRouter.route("/auth", authRouter); // <-- ensures /api/auth/* exists
 
 // ---- VIEW aggregator ----
 export const viewRouter = new Hono();
