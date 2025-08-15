@@ -1,95 +1,75 @@
 // src/utils/encryption.ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
-import path, { join, dirname } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
 
 export type TwitterTokens = {
-  token_type?: string;
-  tokenType?: string;
-  expires_in?: number;
-  expiresIn?: number;
-  access_token?: string;
-  accessToken?: string;
-  scope?: string;
-  refresh_token?: string;
-  refreshToken?: string;
-  created_at: number;
+  accessToken: string;
+  refreshToken: string;
 };
 
-// ---------- stable path resolution (absolute) ----------
-function isDirWritable(dir: string): boolean {
-  try {
-    mkdirSync(dir, { recursive: true });
-    const tmp = join(dir, ".__write_test.tmp");
-    writeFileSync(tmp, "ok");
-    unlinkSync(tmp);
-    return true;
-  } catch {
-    return false;
-  }
+const DATA_DIR = join(import.meta.dir, "../../data");
+export const TOKENS_FILE_PATH = join(DATA_DIR, "tokens.json");
+
+type EncryptedBlobV2 = {
+  version: 2;
+  kdf: "PBKDF2-SHA256";
+  rounds: number; // 100_000
+  salt: string;   // base64
+  iv: string;     // base64 (12 bytes)
+  ciphertext: string; // base64
+  createdAt: number;
+};
+
+function toBytes(s: string) {
+  return new TextEncoder().encode(s);
+}
+function fromBytes(b: Uint8Array) {
+  return new TextDecoder().decode(b);
+}
+function b64e(buf: Uint8Array) {
+  return Buffer.from(buf).toString("base64");
+}
+function b64d(b64: string) {
+  return new Uint8Array(Buffer.from(b64, "base64"));
 }
 
-// project root = two levels up from this file: src/utils → (..) → src → (..) → repo root
-const REPO_ROOT = path.resolve(import.meta.dir, "../..");
-
-function resolveTokensPath(): string {
-  const fromEnv = process.env.TOKENS_FILE_PATH;
-  if (fromEnv) {
-    // Make env relative to project root if not absolute
-    const abs = path.isAbsolute(fromEnv) ? fromEnv : path.join(REPO_ROOT, fromEnv);
-    return abs;
-  }
-
-  // Prefer Render disk (/data) if writable
-  if (isDirWritable("/data")) return "/data/tokens.json";
-
-  // Fallback to repo-local data directory
-  const localDir = path.join(REPO_ROOT, "data");
-  mkdirSync(localDir, { recursive: true });
-  return path.join(localDir, "tokens.json");
-}
-
-// Single source of truth (absolute path)
-export const TOKENS_FILE_PATH = resolveTokensPath();
-
-// Some parts of the code import this:
-export function tokenAlreadyExists(): boolean {
-  return existsSync(TOKENS_FILE_PATH);
-}
-
-// ---------- crypto helpers ----------
-const te = new TextEncoder();
-const td = new TextDecoder();
-
-async function deriveAesKey(passphrase: string, salt: Uint8Array) {
-  const material = await crypto.subtle.importKey("raw", te.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+async function deriveKey(passphrase: string, salt: Uint8Array) {
+  const keyMaterial = await crypto.subtle.importKey("raw", toBytes(passphrase), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 310_000, hash: "SHA-256" },
-    material,
+    { name: "PBKDF2", salt, iterations: 100_000, hash: "SHA-256" },
+    keyMaterial,
     { name: "AES-GCM", length: 256 },
     false,
     ["encrypt", "decrypt"]
   );
 }
 
-export async function saveTokens(tokens: TwitterTokens, passphrase: string): Promise<void> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await deriveAesKey(passphrase, salt);
+export async function saveTokens(
+  accessToken: string,
+  refreshToken: string,
+  passphrase: string
+): Promise<void> {
+  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
-  const plaintext = te.encode(JSON.stringify(tokens));
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(passphrase, salt);
+
+  const plaintext = toBytes(JSON.stringify({ accessToken, refreshToken } satisfies TwitterTokens));
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
 
-  mkdirSync(dirname(TOKENS_FILE_PATH), { recursive: true });
-
-  const payload = {
-    iv: Buffer.from(iv).toString("base64"),
-    salt: Buffer.from(salt).toString("base64"),
-    data: Buffer.from(ciphertext).toString("base64"),
-    created_at: tokens.created_at ?? Date.now(),
+  const blob: EncryptedBlobV2 = {
+    version: 2,
+    kdf: "PBKDF2-SHA256",
+    rounds: 100_000,
+    salt: b64e(salt),
+    iv: b64e(iv),
+    ciphertext: b64e(ciphertext),
+    createdAt: Date.now()
   };
 
+  writeFileSync(TOKENS_FILE_PATH, JSON.stringify(blob, null, 2));
   console.log(`[tokens] Saving tokens to ${TOKENS_FILE_PATH}`);
-  writeFileSync(TOKENS_FILE_PATH, JSON.stringify(payload), "utf8");
 }
 
 export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
@@ -98,17 +78,62 @@ export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
   if (!existsSync(TOKENS_FILE_PATH)) {
     console.error(`[tokens] Not found at ${TOKENS_FILE_PATH}`);
     throw new Error("Twitter tokens file not found. Please set up tokens first.");
-  }
-
+    }
   const raw = readFileSync(TOKENS_FILE_PATH, "utf8");
-  const { iv, salt, data } = JSON.parse(raw);
 
-  const key = await deriveAesKey(passphrase, Buffer.from(salt, "base64"));
-  const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: Buffer.from(iv, "base64") },
-    key,
-    Buffer.from(data, "base64")
-  );
+  try {
+    const parsed = JSON.parse(raw);
 
-  return JSON.parse(td.decode(plaintext)) as TwitterTokens;
+    // V2 encrypted format
+    if (parsed?.version === 2 && parsed?.ciphertext && parsed?.salt && parsed?.iv) {
+      const salt = b64d(parsed.salt);
+      const iv = b64d(parsed.iv);
+      const key = await deriveKey(passphrase, salt);
+
+      try {
+        const plain = new Uint8Array(
+          await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, b64d(parsed.ciphertext))
+        );
+        const obj = JSON.parse(fromBytes(plain));
+        if (!obj?.accessToken || !obj?.refreshToken) {
+          throw new Error("Decrypted content missing tokens");
+        }
+        return obj as TwitterTokens;
+      } catch (e) {
+        // Map WebCrypto DOMException → friendly error
+        throw new Error(
+          "Decryption failed (likely wrong ENCRYPTION_KEY or corrupted tokens file). " +
+          "Reset tokens and re-authorize."
+        );
+      }
+    }
+
+    // Legacy plaintext (fallback): allow migration once
+    if (parsed?.accessToken && parsed?.refreshToken) {
+      return parsed as TwitterTokens;
+    }
+
+    throw new Error("Unrecognized tokens file format. Reset tokens and re-authorize.");
+  } catch (e: any) {
+    if (e?.message?.includes("Decryption failed")) throw e;
+    console.error("[tokens] loadTokens parse error:", e);
+    throw new Error("Invalid tokens file. Reset tokens and re-authorize.");
+  }
+}
+
+export function tokensFileExists(): boolean {
+  return existsSync(TOKENS_FILE_PATH);
+}
+
+export function deleteTokensFile(): boolean {
+  try {
+    if (existsSync(TOKENS_FILE_PATH)) {
+      rmSync(TOKENS_FILE_PATH);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.error("[tokens] delete error:", e);
+    return false;
+  }
 }
