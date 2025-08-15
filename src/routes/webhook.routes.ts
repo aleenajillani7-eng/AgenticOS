@@ -1,19 +1,20 @@
+// src/routes/webhook.routes.ts
 import { Hono } from "hono";
+import authMiddleware from "../middleware/auth.middleware";
 import {
   registerWebhook,
-  tweetWebhook,
-  renderLiveNews,
   subscribeToCategories,
+  tweetWebhook,
 } from "../controllers/webhook.controller";
-import authMiddleware from "../middleware/auth.middleware";
 
-// Create a Hono router for webhook routes
-const router = new Hono();
+const webhookRouter = new Hono();
 
-// Register webhook routes
-router.post("/", tweetWebhook); // Webhook Listener
-router.post("/register", authMiddleware, registerWebhook); // Webhook Registration
-router.get("/live-news", renderLiveNews); // Live News Page
-router.post("/categories/subscribe", authMiddleware, subscribeToCategories); // Subscribe to Categories
+// Public endpoint for external webhook to hit your bot (optional)
+webhookRouter.post("/incoming", tweetWebhook);
 
-export default router;
+// Protect management endpoints with your password middleware
+webhookRouter.use("/*", authMiddleware);
+webhookRouter.post("/register", registerWebhook);
+webhookRouter.post("/categories/subscribe", subscribeToCategories);
+
+export default webhookRouter;
