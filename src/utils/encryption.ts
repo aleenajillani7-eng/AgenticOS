@@ -18,6 +18,11 @@ export type TwitterTokens = {
 // Single source of truth for tokens file location
 export const TOKENS_FILE_PATH = process.env.TOKENS_FILE_PATH ?? "/data/tokens.json";
 
+// Some code elsewhere expects this named export:
+export function tokenAlreadyExists(): boolean {
+  return existsSync(TOKENS_FILE_PATH);
+}
+
 const te = new TextEncoder();
 const td = new TextDecoder();
 
@@ -53,7 +58,7 @@ export async function saveTokens(tokens: TwitterTokens, passphrase: string): Pro
   writeFileSync(TOKENS_FILE_PATH, JSON.stringify(payload), "utf8");
 }
 
-export async function loadTokens(passphrase: string) {
+export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
   console.log(`[tokens] Loading tokens from ${TOKENS_FILE_PATH}`);
 
   if (!existsSync(TOKENS_FILE_PATH)) {
@@ -71,5 +76,5 @@ export async function loadTokens(passphrase: string) {
     Buffer.from(data, "base64")
   );
 
-  return JSON.parse(td.decode(plaintext));
+  return JSON.parse(td.decode(plaintext)) as TwitterTokens;
 }
