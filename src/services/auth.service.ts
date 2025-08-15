@@ -85,7 +85,7 @@ export async function handleCallback(code: string, state: string) {
 
   if (!existsSync(TOKENS_FILE_PATH)) {
     console.error(`[auth] saveTokens completed but file not found at ${TOKENS_FILE_PATH}`);
-    throw new Error("Token save failed (file missing after save). Check writable directory.");
+    throw new Error("Token save failed (file missing after save). Check TOKENS_FILE_PATH directory is writable.");
   } else {
     console.log(`[auth] Tokens saved to ${TOKENS_FILE_PATH}`);
   }
