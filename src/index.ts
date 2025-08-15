@@ -5,6 +5,13 @@ import { prettyJSON } from "hono/pretty-json";
 import { env } from "./config/env";
 import { apiRouter, viewRouter } from "./routes";
 import { scheduleTweets } from "./jobs/tweet.job";
+import { Hono } from "hono";
+import { tweetRouter } from "./tweet.route";
+
+export const apiRouter = new Hono();
+
+apiRouter.route("/tweets", tweetRouter);
+
 
 // Create Hono app
 const app = new Hono();
