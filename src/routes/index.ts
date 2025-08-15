@@ -1,11 +1,10 @@
+// src/routes/index.ts
 import { Hono } from "hono";
-import { authRouter } from "./auth.route";
 import { tweetRouter } from "./tweet.route";
 import { mentionRouter } from "./mention.route";
 
 export const apiRouter = new Hono();
 
-// API routes
-apiRouter.route("/auth", authRouter);
+// Mount child routers
 apiRouter.route("/tweets", tweetRouter);
 apiRouter.route("/mentions", mentionRouter);
