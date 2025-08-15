@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 
 export type TwitterTokens = {
-  token_type?: string;   // snake_case (from Twitter)
-  tokenType?: string;    // camelCase (compat)
+  token_type?: string;   // from Twitter
+  tokenType?: string;    // camelCase alias
   expires_in?: number;
   expiresIn?: number;
   access_token?: string;
@@ -15,21 +15,14 @@ export type TwitterTokens = {
   created_at: number;
 };
 
-// Single source of truth for where tokens live
+// Single source of truth for the tokens file path
 export const TOKENS_FILE_PATH = process.env.TOKENS_FILE_PATH ?? "/data/tokens.json";
 
 const te = new TextEncoder();
 const td = new TextDecoder();
 
-// Derive a 256-bit AES-GCM key from the passphrase and a per-file salt.
 async function deriveAesKey(passphrase: string, salt: Uint8Array) {
-  const material = await crypto.subtle.importKey(
-    "raw",
-    te.encode(passphrase),
-    "PBKDF2",
-    false,
-    ["deriveKey"]
-  );
+  const material = await crypto.subtle.importKey("raw", te.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
     { name: "PBKDF2", salt, iterations: 310_000, hash: "SHA-256" },
     material,
@@ -45,11 +38,10 @@ export async function saveTokens(tokens: TwitterTokens, passphrase: string): Pro
   const key = await deriveAesKey(passphrase, salt);
 
   const plaintext = te.encode(JSON.stringify(tokens));
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext)
-  );
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
 
   mkdirSync(path.dirname(TOKENS_FILE_PATH), { recursive: true });
+
   const payload = {
     iv: Buffer.from(iv).toString("base64"),
     salt: Buffer.from(salt).toString("base64"),
@@ -72,16 +64,12 @@ export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
   const raw = readFileSync(TOKENS_FILE_PATH, "utf8");
   const { iv, salt, data } = JSON.parse(raw);
 
-  const key = await deriveAesKey(
-    passphrase,
-    Buffer.from(salt, "base64")
-  );
+  const key = await deriveAesKey(passphrase, Buffer.from(salt, "base64"));
   const plaintext = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: Buffer.from(iv, "base64") },
     key,
     Buffer.from(data, "base64")
   );
 
-  const parsed = JSON.parse(td.decode(plaintext)) as TwitterTokens;
-  return parsed;
+  return JSON.parse(td.decode(plaintext)) as TwitterTokens;
 }
