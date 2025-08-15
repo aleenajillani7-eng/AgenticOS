@@ -8,20 +8,20 @@ import { craftTLDRabbitReply } from "../services/persona.service";
 
 type State = {
   sinceId?: string;
-  nextAllowedAt?: number; // epoch ms: do nothing until now (rate-limit backoff)
-  me?: string;            // cached self user id (backup to service cache)
+  nextAllowedAt?: number; // epoch ms backoff window
+  me?: string;            // cached self id
   lastRunAt?: number;     // last manual run ts
 };
 
 const STATE_PATH = join(dirname(TOKENS_FILE_PATH), "mentions-state.json");
 
-// Be gentle; you can raise this to 2–3 if you’re not hitting 429s
-const MAX_REPLIES_PER_CYCLE = 2;
+// Be extra gentle to avoid 429s. You can raise later.
+const MAX_REPLIES_PER_CYCLE = 1;
 
-// Poll every 3 minutes (cron job). Manual runs can happen anytime (with cooldown).
-const CRON_EXPR = "*/3 * * * *";
+// Poll every 5 minutes to reduce pressure (you can move this to */3 or */1 later).
+const CRON_EXPR = "*/5 * * * *";
 
-// Manual “Run Now” cooldown (avoid user clicking repeatedly)
+// Manual “Run Now” cooldown to avoid button-spam
 const MANUAL_COOLDOWN_MS = 60_000;
 
 // Fallback backoff if Twitter doesn't send Retry-After
@@ -32,8 +32,7 @@ let job: ScheduledTask | null = null;
 function loadState(): State {
   try {
     if (!existsSync(STATE_PATH)) return {};
-    const txt = readFileSync(STATE_PATH, "utf8");
-    return JSON.parse(txt) as State;
+    return JSON.parse(readFileSync(STATE_PATH, "utf8")) as State;
   } catch {
     return {};
   }
@@ -46,7 +45,6 @@ function saveState(s: State) {
     console.error("[mentions] Failed saving state:", e);
   }
 }
-
 function nextAllowedFromError(err: any): number {
   const ra = err?.response?.headers?.["retry-after"];
   const ms = ra ? Number(ra) * 1000 : RATE_LIMIT_FALLBACK_MS;
@@ -62,19 +60,27 @@ export async function runMentionsOnce(opts?: { manual?: boolean }): Promise<{
   const manual = !!opts?.manual;
   const state = loadState();
 
-  // Respect persisted backoff
+  // honor persisted backoff
   if (state.nextAllowedAt && Date.now() < state.nextAllowedAt) {
-    const waitMs = state.nextAllowedAt - Date.now();
-    return { handled: 0, lastId: state.sinceId, skipped: `backoff_active_${waitMs}ms`, nextAllowedAt: state.nextAllowedAt };
-    }
-  // Manual cooldown
+    return {
+      handled: 0,
+      lastId: state.sinceId,
+      skipped: `backoff_active_${state.nextAllowedAt - Date.now()}ms`,
+      nextAllowedAt: state.nextAllowedAt,
+    };
+  }
+
+  // manual cooldown
   if (manual && state.lastRunAt && Date.now() - state.lastRunAt < MANUAL_COOLDOWN_MS) {
-    const waitMs = MANUAL_COOLDOWN_MS - (Date.now() - state.lastRunAt);
-    return { handled: 0, lastId: state.sinceId, skipped: `manual_cooldown_${waitMs}ms` };
+    return {
+      handled: 0,
+      lastId: state.sinceId,
+      skipped: `manual_cooldown_${MANUAL_COOLDOWN_MS - (Date.now() - state.lastRunAt)}ms`,
+    };
   }
 
   try {
-    // Cache self id (state-level) to reduce /users/me calls if service cache evicts
+    // cache self id (as backup to service cache)
     let me = state.me;
     if (!me) {
       me = await getSelfUserId();
@@ -89,51 +95,52 @@ export async function runMentionsOnce(opts?: { manual?: boolean }): Promise<{
       return { handled: 0, lastId: state.sinceId };
     }
 
-    // oldest → newest
+    // oldest → newest, then cap
     mentions.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
     const batch = mentions.slice(0, MAX_REPLIES_PER_CYCLE);
 
-    let lastId = state.sinceId;
     let handled = 0;
+    // advance checkpoint only on successful replies
+    let lastSuccessfulId = state.sinceId;
 
     for (const m of batch) {
-      lastId = m.id;
-
-      // skip our own tweets
-      if (m.author_id === me) continue;
+      if (m.author_id === me) {
+        lastSuccessfulId = m.id;
+        continue;
+      }
 
       const reply = craftTLDRabbitReply(m.text);
-
       try {
         await postReply(reply, m.id);
         handled++;
+        lastSuccessfulId = m.id;
       } catch (err: any) {
-        // If 429 while replying, persist a backoff window and stop this cycle
         if (err?.response?.status === 429) {
           const next = nextAllowedFromError(err);
           state.nextAllowedAt = next;
-          state.sinceId = lastId; // we advanced reading, but couldn't reply; it's OK to move on
           state.lastRunAt = Date.now();
+          // DO NOT advance sinceId here — we’ll retry this tweet after backoff
           saveState(state);
-          return { handled, lastId, skipped: "rate_limited", nextAllowedAt: next };
+          return { handled, lastId: lastSuccessfulId, skipped: "rate_limited", nextAllowedAt: next };
         }
         console.error("[mentions] Failed to reply:", err?.message || err);
+        // keep lastSuccessfulId unchanged so we retry next run
       }
     }
 
-    state.sinceId = lastId;
+    state.sinceId = lastSuccessfulId;
     state.lastRunAt = Date.now();
     saveState(state);
 
-    return { handled, lastId };
+    return { handled, lastId: lastSuccessfulId };
   } catch (e: any) {
-    // If fetchMentions itself hit 429 after retries, set a backoff so cron doesn't hammer
     if (e?.response?.status === 429) {
-      const state2 = loadState();
-      state2.nextAllowedAt = nextAllowedFromError(e);
-      state2.lastRunAt = Date.now();
-      saveState(state2);
-      return { handled: 0, lastId: state2.sinceId, skipped: "rate_limited", nextAllowedAt: state2.nextAllowedAt };
+      const next = nextAllowedFromError(e);
+      const s2 = loadState();
+      s2.nextAllowedAt = next;
+      s2.lastRunAt = Date.now();
+      saveState(s2);
+      return { handled: 0, lastId: s2.sinceId, skipped: "rate_limited", nextAllowedAt: next };
     }
     console.error("[mentions] runMentionsOnce error:", e?.message || e);
     return { handled: 0 };
