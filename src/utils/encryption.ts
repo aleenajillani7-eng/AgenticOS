@@ -1,6 +1,6 @@
 // src/utils/encryption.ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import path from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
+import path, { join, dirname } from "path";
 
 export type TwitterTokens = {
   token_type?: string;
@@ -15,14 +15,42 @@ export type TwitterTokens = {
   created_at: number;
 };
 
-// Single source of truth for tokens file location
-export const TOKENS_FILE_PATH = process.env.TOKENS_FILE_PATH ?? "/data/tokens.json";
+// ---------- path selection helpers ----------
+function isDirWritable(dir: string): boolean {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const tmp = join(dir, ".__write_test.tmp");
+    writeFileSync(tmp, "ok");
+    unlinkSync(tmp);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-// Some code elsewhere expects this named export:
+function resolveTokensPath(): string {
+  // 1) Explicit env wins
+  const fromEnv = process.env.TOKENS_FILE_PATH;
+  if (fromEnv) return fromEnv;
+
+  // 2) Prefer Render disk (/data) if writable
+  if (isDirWritable("/data")) return "/data/tokens.json";
+
+  // 3) Fallback to local repo data directory
+  const localDir = path.resolve("./data");
+  mkdirSync(localDir, { recursive: true });
+  return join(localDir, "tokens.json");
+}
+
+// Single source of truth for tokens location
+export const TOKENS_FILE_PATH = resolveTokensPath();
+
+// Some parts of the code import this:
 export function tokenAlreadyExists(): boolean {
   return existsSync(TOKENS_FILE_PATH);
 }
 
+// ---------- crypto ----------
 const te = new TextEncoder();
 const td = new TextDecoder();
 
@@ -45,7 +73,7 @@ export async function saveTokens(tokens: TwitterTokens, passphrase: string): Pro
   const plaintext = te.encode(JSON.stringify(tokens));
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
 
-  mkdirSync(path.dirname(TOKENS_FILE_PATH), { recursive: true });
+  mkdirSync(dirname(TOKENS_FILE_PATH), { recursive: true });
 
   const payload = {
     iv: Buffer.from(iv).toString("base64"),
