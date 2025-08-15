@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 
 export type TwitterTokens = {
-  token_type?: string;   // from Twitter
-  tokenType?: string;    // camelCase alias
+  token_type?: string;
+  tokenType?: string;
   expires_in?: number;
   expiresIn?: number;
   access_token?: string;
@@ -15,7 +15,7 @@ export type TwitterTokens = {
   created_at: number;
 };
 
-// Single source of truth for the tokens file path
+// Single source of truth for tokens file location
 export const TOKENS_FILE_PATH = process.env.TOKENS_FILE_PATH ?? "/data/tokens.json";
 
 const te = new TextEncoder();
@@ -53,7 +53,7 @@ export async function saveTokens(tokens: TwitterTokens, passphrase: string): Pro
   writeFileSync(TOKENS_FILE_PATH, JSON.stringify(payload), "utf8");
 }
 
-export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
+export async function loadTokens(passphrase: string) {
   console.log(`[tokens] Loading tokens from ${TOKENS_FILE_PATH}`);
 
   if (!existsSync(TOKENS_FILE_PATH)) {
@@ -71,5 +71,5 @@ export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
     Buffer.from(data, "base64")
   );
 
-  return JSON.parse(td.decode(plaintext)) as TwitterTokens;
+  return JSON.parse(td.decode(plaintext));
 }
