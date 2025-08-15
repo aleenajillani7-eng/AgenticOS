@@ -10,15 +10,10 @@ const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY!;
 const TOKEN_URL = "https://api.twitter.com/2/oauth2/token";
 const AUTH_BASE = "https://twitter.com/i/oauth2/authorize";
 
-// In-memory store for PKCE verifier keyed by state
 const verifierStore = new Map<string, string>();
 
 function b64url(input: Buffer | string) {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+  return Buffer.from(input).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 function sha256Buf(input: string) {
   return createHash("sha256").update(input).digest();
@@ -63,9 +58,7 @@ function normalizeTokens(raw: any): TwitterTokens {
 
 export async function handleCallback(code: string, state: string) {
   const code_verifier = verifierStore.get(state);
-  if (!code_verifier) {
-    throw new Error("Missing or expired PKCE verifier (invalid state). Try auth again.");
-  }
+  if (!code_verifier) throw new Error("Missing or expired PKCE verifier (invalid state). Try auth again.");
   verifierStore.delete(state);
 
   const body = new URLSearchParams();
@@ -80,7 +73,7 @@ export async function handleCallback(code: string, state: string) {
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: {
-      "Authorization": `Basic ${basicAuth}`,
+      Authorization: `Basic ${basicAuth}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body,
