@@ -15,17 +15,20 @@
       </div>
     </div>
     <p class="text-gray-500 mt-2 text-sm">
-      This runs the mentions worker immediately (in addition to the scheduled poller).
+      Runs the mentions worker immediately (in addition to the scheduled poller).
       Replies follow your TL;DRabbit persona: two lines, no links/hashtags.
     </p>
   </div>
 
   <div class="bg-white rounded-lg shadow p-6">
     <h2 class="text-lg font-semibold text-gray-800 mb-3">Status</h2>
-    <div id="statusBox" class="text-sm text-gray-700">
+    <div id="statusBox" class="text-sm text-gray-700 space-y-1">
       <div><span class="font-medium">State file:</span> <code id="statePath">loading…</code></div>
       <div><span class="font-medium">Last sinceId:</span> <code id="sinceId">loading…</code></div>
+      <div><span class="font-medium">Next allowed at:</span> <code id="nextAllowedAt">loading…</code></div>
+      <div><span class="font-medium">Running:</span> <code id="running">loading…</code></div>
     </div>
+
     <div id="resultBox" class="mt-4 hidden">
       <div class="rounded-md bg-blue-50 p-3 text-blue-800" id="resultText"></div>
     </div>
@@ -37,13 +40,10 @@
   <div class="bg-white w-full max-w-sm mx-auto mt-40 rounded-lg shadow-lg p-6">
     <h3 class="text-lg font-semibold text-gray-800 mb-2">Confirm</h3>
     <p class="text-sm text-gray-600 mb-4">Enter your password to run the mentions worker now.</p>
-    <input id="pwInput" type="password" class="w-full border rounded px-3 py-2"
-           placeholder="Password" />
+    <input id="pwInput" type="password" class="w-full border rounded px-3 py-2" placeholder="Password" />
     <div class="flex justify-end gap-2 mt-4">
       <button id="pwCancel" class="px-4 py-2 rounded bg-gray-100 hover:bg-gray-200">Cancel</button>
-      <button id="pwSubmit" class="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">
-        Run now
-      </button>
+      <button id="pwSubmit" class="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">Run now</button>
     </div>
   </div>
 </div>
@@ -54,6 +54,9 @@
 
   const sinceIdEl = document.getElementById("sinceId");
   const statePathEl = document.getElementById("statePath");
+  const nextAllowedAtEl = document.getElementById("nextAllowedAt");
+  const runningEl = document.getElementById("running");
+
   const resultBox = document.getElementById("resultBox");
   const resultText = document.getElementById("resultText");
 
@@ -62,15 +65,26 @@
   const pwCancel = document.getElementById("pwCancel");
   const pwSubmit = document.getElementById("pwSubmit");
 
+  function fmt(ts) {
+    if (!ts) return "(none)";
+    const d = new Date(Number(ts));
+    if (isNaN(d.getTime())) return "(none)";
+    return d.toISOString();
+  }
+
   async function loadStatus() {
     try {
       const r = await fetch(statusUrl);
       const j = await r.json();
       statePathEl.textContent = j.statePath || "n/a";
       sinceIdEl.textContent = j.sinceId || "(none yet)";
+      nextAllowedAtEl.textContent = j.nextAllowedAt ? fmt(j.nextAllowedAt) : "(not rate-limited)";
+      runningEl.textContent = String(!!j.running);
     } catch {
       statePathEl.textContent = "error";
       sinceIdEl.textContent = "error";
+      nextAllowedAtEl.textContent = "error";
+      runningEl.textContent = "error";
     }
   }
 
@@ -89,7 +103,7 @@
 
     try {
       resultBox.classList.remove("hidden");
-      resultText.textContent = "Running…";
+      resultText.textContent = "Starting…";
 
       const r = await fetch(runUrl, {
         method: "POST",
@@ -100,9 +114,12 @@
       });
       const j = await r.json();
 
-      if (!r.ok) {
+      if (r.status === 202 && j.started) {
+        resultText.textContent = "Started in background. Check status in a moment…";
+      } else if (!r.ok) {
         resultText.textContent = `Error: ${j?.error || "failed"}`;
       } else {
+        // Fallback (if endpoint ever returns immediate results)
         const n = j.handled ?? 0;
         resultText.textContent = `Replied to ${n} mention(s). sinceId: ${j.lastId || "(unchanged)"}`;
       }
@@ -110,7 +127,7 @@
       resultText.textContent = "Request failed. See server logs.";
     } finally {
       closePwModal();
-      loadStatus();
+      setTimeout(loadStatus, 1500);
     }
   }
 
