@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "fs";
 
 export const mentionRouter = new Hono();
 
-// simple in-memory lock to avoid overlapping runs
+// in-memory lock to avoid overlapping runs
 let isRunning = false;
 
 // Liveness
@@ -16,7 +16,7 @@ mentionRouter.get("/", (c) =>
   c.json({ success: true, message: "Mentions endpoint is live." })
 );
 
-// Status: last sinceId, backoff window, and whether a run is in-flight
+// Status: last sinceId, backoff window, whether a run is in-flight
 mentionRouter.get("/status", (c) => {
   const path = join(dirname(TOKENS_FILE_PATH), "mentions-state.json");
   let sinceId: string | undefined;
@@ -38,13 +38,14 @@ mentionRouter.get("/status", (c) => {
   return c.json({ ok: true, sinceId, nextAllowedAt, lastRunAt, statePath: path, running: isRunning });
 });
 
-// Manual one-off run, **non-blocking**: starts in background and returns 202 immediately
+// Manual one-off run: fire-and-forget (returns immediately)
 mentionRouter.post("/run", authMiddleware, async (c) => {
   if (isRunning) {
     return c.json({ ok: false, error: "runner_busy" }, 429);
   }
 
   isRunning = true;
+  // Do NOT await — let it run in the background
   (async () => {
     try {
       const res = await runMentionsOnce({ manual: true });
