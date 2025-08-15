@@ -23,11 +23,9 @@ export function getAuthUrl(): string {
   const code_verifier = b64url(randomBytes(32));
   const code_challenge = b64url(sha256Buf(code_verifier));
   const state = b64url(randomBytes(16));
-
   verifierStore.set(state, code_verifier);
 
   const scope = ["tweet.read", "tweet.write", "users.read", "offline.access"].join(" ");
-
   const url = new URL(AUTH_BASE);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", CLIENT_ID);
@@ -87,7 +85,7 @@ export async function handleCallback(code: string, state: string) {
 
   if (!existsSync(TOKENS_FILE_PATH)) {
     console.error(`[auth] saveTokens completed but file not found at ${TOKENS_FILE_PATH}`);
-    throw new Error("Token save failed (file missing after save). Check TOKENS_FILE_PATH and /data disk.");
+    throw new Error("Token save failed (file missing after save). Check writable directory.");
   } else {
     console.log(`[auth] Tokens saved to ${TOKENS_FILE_PATH}`);
   }
