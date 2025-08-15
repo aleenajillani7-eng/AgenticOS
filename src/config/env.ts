@@ -11,7 +11,6 @@ const envSchema = z.object({
   // Twitter API Credentials
   TWITTER_CLIENT_ID: z.string().min(1, "Twitter Client ID is required"),
   TWITTER_CLIENT_SECRET: z.string().min(1, "Twitter Client Secret is required"),
-  TWITTER_USERNAME: z.string().min(1, "Twitter username is required"), // ✅ Added this
 
   // Encryption Settings
   ENCRYPTION_KEY: z
@@ -28,6 +27,7 @@ const envSchema = z.object({
 });
 
 // Parse and validate environment variables
+// Bun automatically loads .env file, no need for dotenv
 const parseEnv = () => {
   try {
     return envSchema.parse(process.env);
