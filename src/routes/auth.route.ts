@@ -2,8 +2,11 @@
 import { Hono } from "hono";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
+
 import { getAuthUrl, handleCallback } from "../services/auth.service";
 import { TOKENS_FILE_PATH, loadTokens } from "../utils/encryption";
+import { scheduleTweets } from "../jobs/tweet.job";
+import { startMentionsJob } from "../jobs/mentions.job";
 
 export const authRouter = new Hono();
 
@@ -11,7 +14,7 @@ export const authRouter = new Hono();
 authRouter.get("/", (c) => c.redirect(getAuthUrl()));
 authRouter.get("/login", (c) => c.redirect(getAuthUrl()));
 
-// Callback: save tokens, do NOT return them
+// Callback: save tokens, verify, then start background jobs
 authRouter.get("/callback", async (c) => {
   try {
     const url = new URL(c.req.url);
@@ -20,6 +23,25 @@ authRouter.get("/callback", async (c) => {
     if (!code || !state) return c.json({ success: false, error: "Missing OAuth code/state" }, 400);
 
     await handleCallback(code, state);
+
+    // verify decryption with the current key
+    await loadTokens(process.env.ENCRYPTION_KEY || "");
+
+    // start (or re-start) jobs now that tokens exist
+    try {
+      scheduleTweets();          // idempotent in our job impl (stops then sets up)
+      console.log("[scheduler] Started after auth");
+    } catch (e) {
+      console.error("[scheduler] Failed to start after auth:", e);
+    }
+
+    try {
+      startMentionsJob();        // idempotent; no-op if already running
+      console.log("[mentions] Job started after auth");
+    } catch (e) {
+      console.error("[mentions] Failed to start after auth:", e);
+    }
+
     return c.json({ success: true, message: "Bot is now authorized to reply to mentions 🚀" });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Auth failed (unknown error)";
@@ -63,7 +85,7 @@ authRouter.get("/debug", (c) => {
   });
 });
 
-// Reset tokens (danger!)
+// Reset tokens (danger)
 authRouter.get("/reset", (c) => {
   const url = new URL(c.req.url);
   const confirm = url.searchParams.get("confirm");
