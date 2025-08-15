@@ -17,17 +17,20 @@ mentionRouter.get("/", (c) =>
 mentionRouter.get("/status", (c) => {
   const path = join(dirname(TOKENS_FILE_PATH), "mentions-state.json");
   let sinceId: string | undefined;
+  let nextAllowedAt: number | undefined;
+
   if (existsSync(path)) {
     try {
-      const s = JSON.parse(readFileSync(path, "utf8")) as { sinceId?: string };
+      const s = JSON.parse(readFileSync(path, "utf8")) as { sinceId?: string; nextAllowedAt?: number };
       sinceId = s.sinceId;
+      nextAllowedAt = s.nextAllowedAt;
     } catch {}
   }
-  return c.json({ ok: true, sinceId, statePath: path });
+  return c.json({ ok: true, sinceId, nextAllowedAt, statePath: path });
 });
 
-// Manual run (protected)
+// Manual one-off run
 mentionRouter.post("/run", authMiddleware, async (c) => {
-  const res = await runMentionsOnce();
+  const res = await runMentionsOnce({ manual: true });
   return c.json({ ok: true, ...res });
 });
