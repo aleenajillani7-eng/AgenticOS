@@ -36,7 +36,6 @@ export function getAuthUrl(): string {
   url.searchParams.set("state", state);
   url.searchParams.set("code_challenge", code_challenge);
   url.searchParams.set("code_challenge_method", "S256");
-
   return url.toString();
 }
 
@@ -72,13 +71,9 @@ export async function handleCallback(code: string, state: string) {
 
   const res = await fetch(TOKEN_URL, {
     method: "POST",
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
+    headers: { Authorization: `Basic ${basicAuth}`, "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Token exchange failed: ${res.status} ${text}`);
