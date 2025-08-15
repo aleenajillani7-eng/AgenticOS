@@ -5,7 +5,7 @@ import { logger } from "hono/logger";
 import { prettyJSON } from "hono/pretty-json";
 
 import { env } from "./config/env";
-import { apiRouter } from "./routes";   // ✅ routes aggregator
+import { apiRouter } from "./routes";
 import { scheduleTweets } from "./jobs/tweet.job";
 
 const app = new Hono();
@@ -21,11 +21,41 @@ app.get("/health", (c) => c.json({ ok: true }));
 
 // Home page at "/"
 app.get("/", (c) =>
-  c.html(`<!doctype html>
+  c.html(String.raw`<!doctype html>
 <html>
   <head><meta charset="utf-8"><title>AgenticOS</title></head>
   <body>
     <h1>AgenticOS is running</h1>
     <p>Health: <a href="/health">/health</a></p>
     <p>API base: <code>/api</code></p>
-  </bod
+  </body>
+</html>`)
+);
+
+// API routes
+app.route("/api", apiRouter);
+
+// Error handler
+app.onError((err, c) => {
+  console.error("Global Error Handler:", err);
+  return c.json(
+    {
+      success: false,
+      message: "Internal Server Error",
+      error: (err as Error).message,
+    },
+    500
+  );
+});
+
+// Start Bun server
+const port = Number(env.PORT) || 3000;
+Bun.serve({ fetch: app.fetch, port });
+console.log(`🚀 Twitter AI Agent listening on port ${port}`);
+
+// Start tweet scheduler
+try {
+  scheduleTweets();
+} catch (error) {
+  console.error("Failed to start tweet scheduler:", error);
+}
