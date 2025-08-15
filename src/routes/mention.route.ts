@@ -5,10 +5,11 @@ import { runMentionsOnce } from "../jobs/mentions.job";
 import { dirname, join } from "path";
 import { TOKENS_FILE_PATH } from "../utils/encryption";
 import { existsSync, readFileSync } from "fs";
+import { getSelfUserId } from "../services/twitter.service";
 
 export const mentionRouter = new Hono();
 
-// in-memory lock to avoid overlapping runs
+// simple in-memory lock to avoid overlapping runs
 let isRunning = false;
 
 // Liveness
@@ -16,7 +17,17 @@ mentionRouter.get("/", (c) =>
   c.json({ success: true, message: "Mentions endpoint is live." })
 );
 
-// Status: last sinceId, backoff window, whether a run is in-flight
+// Who am I (helpful if you want to set TWITTER_USER_ID to avoid /users/me calls)
+mentionRouter.get("/whoami", async (c) => {
+  try {
+    const id = await getSelfUserId();
+    return c.json({ ok: true, id, note: "Set TWITTER_USER_ID env to this to skip /users/me" });
+  } catch (e: any) {
+    return c.json({ ok: false, error: e?.message || "failed" }, 500);
+  }
+});
+
+// Status: last sinceId, backoff window, and whether a run is in-flight
 mentionRouter.get("/status", (c) => {
   const path = join(dirname(TOKENS_FILE_PATH), "mentions-state.json");
   let sinceId: string | undefined;
@@ -45,7 +56,6 @@ mentionRouter.post("/run", authMiddleware, async (c) => {
   }
 
   isRunning = true;
-  // Do NOT await — let it run in the background
   (async () => {
     try {
       const res = await runMentionsOnce({ manual: true });
