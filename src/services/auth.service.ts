@@ -1,15 +1,7 @@
 // src/services/auth.service.ts
 import { randomBytes, createHash } from "crypto";
-import { saveTokens } from "../utils/encryption";
-
-type TwitterTokens = {
-  token_type: string;
-  expires_in: number;
-  access_token: string;
-  scope: string;
-  refresh_token?: string;
-  created_at: number;
-};
+import { existsSync } from "fs";
+import { saveTokens, TOKENS_FILE_PATH, TwitterTokens } from "../utils/encryption";
 
 const CLIENT_ID = process.env.TWITTER_CLIENT_ID!;
 const CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET!;
@@ -18,7 +10,7 @@ const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY!;
 const TOKEN_URL = "https://api.twitter.com/2/oauth2/token";
 const AUTH_BASE = "https://twitter.com/i/oauth2/authorize";
 
-// Store verifier in-memory keyed by state (sufficient for single-instance apps)
+// In-memory store for PKCE verifier keyed by state
 const verifierStore = new Map<string, string>();
 
 function b64url(input: Buffer | string) {
@@ -28,7 +20,6 @@ function b64url(input: Buffer | string) {
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
 }
-
 function sha256Buf(input: string) {
   return createHash("sha256").update(input).digest();
 }
@@ -38,15 +29,9 @@ export function getAuthUrl(): string {
   const code_challenge = b64url(sha256Buf(code_verifier));
   const state = b64url(randomBytes(16));
 
-  // Remember verifier for this state
   verifierStore.set(state, code_verifier);
 
-  const scope = [
-    "tweet.read",
-    "tweet.write",
-    "users.read",
-    "offline.access",
-  ].join(" ");
+  const scope = ["tweet.read", "tweet.write", "users.read", "offline.access"].join(" ");
 
   const url = new URL(AUTH_BASE);
   url.searchParams.set("response_type", "code");
@@ -60,17 +45,27 @@ export function getAuthUrl(): string {
   return url.toString();
 }
 
-/**
- * Exchange code for tokens and persist them encrypted.
- * Requires the same `state` returned to your callback to find the PKCE verifier.
- */
+function normalizeTokens(raw: any): TwitterTokens {
+  const now = Date.now();
+  return {
+    token_type: raw.token_type,
+    tokenType: raw.token_type,
+    expires_in: raw.expires_in,
+    expiresIn: raw.expires_in,
+    access_token: raw.access_token,
+    accessToken: raw.access_token,
+    scope: raw.scope,
+    refresh_token: raw.refresh_token,
+    refreshToken: raw.refresh_token,
+    created_at: now,
+  };
+}
+
 export async function handleCallback(code: string, state: string) {
   const code_verifier = verifierStore.get(state);
   if (!code_verifier) {
     throw new Error("Missing or expired PKCE verifier (invalid state). Try auth again.");
   }
-
-  // We no longer need it
   verifierStore.delete(state);
 
   const body = new URLSearchParams();
@@ -96,11 +91,18 @@ export async function handleCallback(code: string, state: string) {
     throw new Error(`Token exchange failed: ${res.status} ${text}`);
   }
 
-  const tokens = await res.json() as Omit<TwitterTokens, "created_at">;
-  const toSave: TwitterTokens = { ...tokens, created_at: Date.now() };
+  const raw = await res.json();
+  const toSave = normalizeTokens(raw);
 
   if (!ENCRYPTION_KEY) throw new Error("ENCRYPTION_KEY is not set");
-  await saveTokens(toSave, ENCRYPTION_KEY); // writes to TOKENS_FILE_PATH (e.g., /data/tokens.json)
+  await saveTokens(toSave, ENCRYPTION_KEY);
+
+  if (!existsSync(TOKENS_FILE_PATH)) {
+    console.error(`[auth] saveTokens completed but file not found at ${TOKENS_FILE_PATH}`);
+    throw new Error("Token save failed (file missing after save). Check TOKENS_FILE_PATH and /data disk.");
+  } else {
+    console.log(`[auth] Tokens saved to ${TOKENS_FILE_PATH}`);
+  }
 
   return toSave;
 }
