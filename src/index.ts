@@ -23,13 +23,16 @@ app.use("/images/*", serveStatic({ root: "./public" }));
 app.get("/health", (c) => c.json({ ok: true }));
 
 // Routers
-app.route("/api", apiRouter);
-app.route("/", viewRouter);
+app.route("/api", apiRouter);   // /api/*
+app.route("/", viewRouter);     // / and /dashboard/*
 
-// Error handler
+// Global error handler
 app.onError((err, c) => {
   console.error("Global Error Handler:", err);
-  return c.json({ success: false, message: "Internal Server Error", error: (err as Error).message }, 500);
+  return c.json(
+    { success: false, message: "Internal Server Error", error: (err as Error).message },
+    500
+  );
 });
 
 // Start server
@@ -37,7 +40,7 @@ const port = Number(env.PORT) || 3000;
 Bun.serve({ fetch: app.fetch, port });
 console.log(`🚀 Twitter AI Agent listening on port ${port}`);
 
-// Start scheduler ONLY if tokens file exists and decrypts
+// Start scheduler ONLY if tokens exist and decrypt successfully
 (async () => {
   try {
     if (existsSync(TOKENS_FILE_PATH)) {
