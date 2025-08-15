@@ -47,7 +47,7 @@ authRouter.get("/probe", async (c) => {
   }
 });
 
-// Check that the directory is writable (helps detect missing /data disk)
+// Is /data writable? Is key set? (detect missing disk)
 authRouter.get("/debug", (c) => {
   const dir = dirname(TOKENS_FILE_PATH);
   let canWrite = false;
