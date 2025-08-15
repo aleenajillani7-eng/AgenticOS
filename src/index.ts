@@ -19,8 +19,8 @@ app.use("/images/*", serveStatic({ root: "./public" }));
 // Health check
 app.get("/health", (c) => c.json({ ok: true }));
 
-// Home page at "/"
-app.get("/", (c) =>
+// Home page at "/" — respond to GET, HEAD, etc.
+app.all("/", (c) =>
   c.html(String.raw`<!doctype html>
 <html>
   <head><meta charset="utf-8"><title>AgenticOS</title></head>
