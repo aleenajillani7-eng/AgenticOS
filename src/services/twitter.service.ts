@@ -1,295 +1,178 @@
 // src/services/twitter.service.ts
-import axios, { AxiosError, AxiosRequestConfig } from "axios";
+import axios, { AxiosError } from "axios";
 import { env } from "../config/env";
 import { loadTokens, saveTokens } from "../utils/encryption";
 import { TwitterOAuthResponse, TwitterPostResponse } from "../types";
 
-// Kept for scheduled posts
+// ChainGPT API URL
 const CHAINGPT_API_URL = "https://webapi.chaingpt.org";
 
-type StoredTokens = {
-  access_token?: string;
-  accessToken?: string;
-  refresh_token?: string;
-  refreshToken?: string;
-  expires_in?: number;
-  expiresIn?: number;
-  created_at?: number;
-  createdAt?: number;
+/** ---------------- Existing helpers you already had ---------------- **/
+export const getAccessToken = async (): Promise<string> => {
+  try {
+    const tokens = await loadTokens(env.ENCRYPTION_KEY);
+
+    try {
+      await axios.get("https://api.twitter.com/2/users/me", {
+        headers: { Authorization: `Bearer ${tokens.accessToken}` },
+      });
+      return tokens.accessToken;
+    } catch {
+      const newTokens = await refreshAccessToken(tokens.refreshToken);
+      await saveTokens(newTokens.accessToken, newTokens.refreshToken, env.ENCRYPTION_KEY);
+      return newTokens.accessToken;
+    }
+  } catch (error) {
+    console.error("Error getting Twitter access token:", error);
+    throw new Error("Failed to get Twitter access token. Check if tokens are set up correctly.");
+  }
 };
 
-function pick<T>(a: T | undefined, b: T | undefined): T | undefined {
-  return a !== undefined ? a : b;
-}
-function normalize(tokens: any): StoredTokens {
-  return {
-    access_token: pick(tokens.access_token, tokens.accessToken),
-    refresh_token: pick(tokens.refresh_token, tokens.refreshToken),
-    expires_in: pick(tokens.expires_in, tokens.expiresIn),
-    created_at: pick(tokens.created_at, tokens.createdAt),
-  };
-}
-function isExpired(t: StoredTokens, skewSeconds = 120): boolean {
-  const created = t.created_at ?? 0;
-  const ttl = t.expires_in ?? 7200;
-  const nowSec = Math.floor(Date.now() / 1000);
-  return nowSec >= Math.floor(created / 1000) + ttl - skewSeconds;
-}
+export const refreshAccessToken = async (refreshToken: string) => {
+  try {
+    const params = new URLSearchParams();
+    params.append("refresh_token", refreshToken);
+    params.append("grant_type", "refresh_token");
+    params.append("client_id", env.TWITTER_CLIENT_ID);
 
-// ---- Backoff helpers ----
-async function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-function jitter(ms: number) {
-  const j = Math.floor(Math.random() * 2000); // add up to 2s jitter
-  return ms + j;
-}
-function computeBackoffMsFromHeaders(headers: any): number {
-  // Prefer Retry-After (seconds). Fallback to x-rate-limit-reset (unix seconds).
-  const ra = headers?.["retry-after"];
-  if (ra) return jitter(Number(ra) * 1000);
-
-  const reset = headers?.["x-rate-limit-reset"];
-  if (reset) {
-    const now = Date.now();
-    const resetMs = Number(reset) * 1000;
-    const wait = resetMs - now + 500; // add small cushion
-    if (wait > 0) return jitter(wait);
-  }
-  return jitter(60_000); // safe default 60s
-}
-
-// ---- Request wrapper with 429 backoff & limited retries ----
-async function requestWithRetry<T>(
-  cfg: AxiosRequestConfig,
-  retries = 2
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      const res = await axios<T>(cfg);
-      return res.data;
-    } catch (err) {
-      const ax = err as AxiosError;
-      const status = ax.response?.status;
-      if (status === 429 && attempt < retries) {
-        const waitMs = computeBackoffMsFromHeaders(ax.response?.headers || {});
-        console.warn(`[rate-limit] 429: backing off ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
-        await sleep(waitMs);
-        attempt++;
-        continue;
-      }
-      throw err;
-    }
-  }
-}
-
-// ---- OAuth refresh (only when needed) ----
-export const refreshAccessToken = async (
-  refreshToken: string
-): Promise<{ accessToken: string; refreshToken: string; expiresIn?: number }> => {
-  const params = new URLSearchParams();
-  params.append("refresh_token", refreshToken);
-  params.append("grant_type", "refresh_token");
-  params.append("client_id", env.TWITTER_CLIENT_ID);
-
-  const response = await axios.post<TwitterOAuthResponse>(
-    "https://api.twitter.com/2/oauth2/token",
-    params,
-    {
+    const response = await axios.post<TwitterOAuthResponse>("https://api.twitter.com/2/oauth2/token", params, {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       auth: { username: env.TWITTER_CLIENT_ID, password: env.TWITTER_CLIENT_SECRET },
-    }
-  );
-
-  return {
-    accessToken: response.data.access_token,
-    refreshToken: response.data.refresh_token || refreshToken,
-    expiresIn: response.data.expires_in,
-  };
-};
-
-export const getAccessToken = async (): Promise<string> => {
-  const raw = await loadTokens(env.ENCRYPTION_KEY);
-  const t = normalize(raw);
-
-  if (!t.access_token || !t.refresh_token) {
-    throw new Error("Stored tokens are incomplete. Please re-authorize.");
-  }
-
-  if (!isExpired(t)) return t.access_token!;
-
-  const refreshed = await refreshAccessToken(t.refresh_token!);
-  await saveTokens(
-    {
-      access_token: refreshed.accessToken,
-      refresh_token: refreshed.refreshToken,
-      token_type: "bearer",
-      expires_in: refreshed.expiresIn ?? 7200,
-      created_at: Date.now(),
-    },
-    env.ENCRYPTION_KEY
-  );
-  return refreshed.accessToken;
-};
-
-// ---- Authed request with refresh-on-401 and 429 backoff ----
-async function authedRequest<T>(
-  cfg: AxiosRequestConfig,
-  doRefreshOn401 = true
-): Promise<T> {
-  try {
-    const token = await getAccessToken();
-    const merged: AxiosRequestConfig = {
-      ...cfg,
-      headers: {
-        ...(cfg.headers || {}),
-        Authorization: `Bearer ${token}`,
-      },
-    };
-    return await requestWithRetry<T>(merged);
-  } catch (err) {
-    const ax = err as AxiosError;
-    if (ax.response?.status === 401 && doRefreshOn401) {
-      const raw = await loadTokens(env.ENCRYPTION_KEY);
-      const t = normalize(raw);
-      if (!t.refresh_token) throw err;
-
-      const refreshed = await refreshAccessToken(t.refresh_token);
-      await saveTokens(
-        {
-          access_token: refreshed.accessToken,
-          refresh_token: refreshed.refreshToken,
-          token_type: "bearer",
-          expires_in: refreshed.expiresIn ?? 7200,
-          created_at: Date.now(),
-        },
-        env.ENCRYPTION_KEY
-      );
-
-      const merged: AxiosRequestConfig = {
-        ...cfg,
-        headers: {
-          ...(cfg.headers || {}),
-          Authorization: `Bearer ${refreshed.accessToken}`,
-        },
-      };
-      return await requestWithRetry<T>(merged, 1);
-    }
-    throw err;
-  }
-}
-
-// ---- ChainGPT text (kept for scheduler) ----
-export const getTextForTweet = async (prompt: string): Promise<string> => {
-  const response = await axios.post(
-    `${CHAINGPT_API_URL}/tweet-generator`,
-    { prompt },
-    {
-      headers: {
-        "Content-Type": "application/json",
-        "api-key": env.CHAINGPT_API_KEY,
-      },
-    }
-  );
-  return String(response.data.tweet || "").slice(0, 270);
-};
-
-// ---- Tweet helpers ----
-export const postTweet = async (
-  accessToken: string,
-  message: string
-): Promise<TwitterPostResponse> => {
-  const cfg: AxiosRequestConfig = {
-    method: "POST",
-    url: "https://api.twitter.com/2/tweets",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-    data: { text: message },
-  };
-  return requestWithRetry<TwitterPostResponse>(cfg);
-};
-
-export const postReply = async (
-  message: string,
-  inReplyToTweetId: string
-): Promise<TwitterPostResponse> => {
-  const cfg: AxiosRequestConfig = {
-    method: "POST",
-    url: "https://api.twitter.com/2/tweets",
-    headers: { "Content-Type": "application/json" },
-    data: { text: message, reply: { in_reply_to_tweet_id: inReplyToTweetId } },
-  };
-  return authedRequest<TwitterPostResponse>(cfg);
-};
-
-// Cache self user id (or read from ENV to avoid /users/me)
-let cachedSelf: { id: string; fetchedAt: number } | null = null;
-
-export const getSelfUserId = async (): Promise<string> => {
-  // If you know your account id, set TWITTER_USER_ID to skip /users/me entirely
-  if (env.TWITTER_USER_ID) return env.TWITTER_USER_ID;
-
-  if (cachedSelf && Date.now() - cachedSelf.fetchedAt < 60 * 60 * 1000) {
-    return cachedSelf.id;
-  }
-  const data = await authedRequest<{ data: { id: string } }>({
-    method: "GET",
-    url: "https://api.twitter.com/2/users/me",
-  });
-  cachedSelf = { id: data.data.id, fetchedAt: Date.now() };
-  return data.data.id;
-};
-
-// Mentions fetch with pagination (catches up >20 items)
-export const fetchMentions = async (
-  userId: string,
-  sinceId?: string
-): Promise<Array<{ id: string; text: string; author_id: string; created_at?: string }>> => {
-  const out: Array<{ id: string; text: string; author_id: string; created_at?: string }> = [];
-  let pageToken: string | undefined;
-  let pages = 0;
-  const MAX_PAGES = 5;    // ~100 tweets max (5 * 20)
-  const PAGE_SIZE = 20;   // Twitter cap per page
-
-  while (pages < MAX_PAGES) {
-    const url = new URL(`https://api.twitter.com/2/users/${userId}/mentions`);
-    url.searchParams.set("max_results", String(PAGE_SIZE));
-    url.searchParams.set("tweet.fields", "author_id,created_at");
-    if (sinceId) url.searchParams.set("since_id", sinceId);
-    if (pageToken) url.searchParams.set("pagination_token", pageToken);
-
-    const data = await authedRequest<{ data?: any[]; meta?: { next_token?: string } }>({
-      method: "GET",
-      url: url.toString(),
     });
 
-    const items = (data.data || []) as Array<{ id: string; text: string; author_id: string; created_at?: string }>;
-    out.push(...items);
-
-    pageToken = data.meta?.next_token;
-    pages++;
-    if (!pageToken || items.length < PAGE_SIZE) break;
+    return {
+      accessToken: response.data.access_token,
+      refreshToken: response.data.refresh_token || refreshToken,
+    };
+  } catch (error) {
+    console.error("Error refreshing access token:", error);
+    throw new Error("Failed to refresh Twitter access token");
   }
-
-  // oldest first for polite processing
-  out.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-  return out;
 };
 
-// For scheduler
-export const generateAndPostTweet = async (
-  prompt: string
-): Promise<{ response: TwitterPostResponse; tweet: string }> => {
+export const getTextForTweet = async (prompt: string): Promise<string> => {
+  try {
+    const response = await axios.post(
+      `${CHAINGPT_API_URL}/tweet-generator`,
+      { prompt },
+      { headers: { "Content-Type": "application/json", "api-key": env.CHAINGPT_API_KEY } }
+    );
+    // Trim to safe length for base tier
+    return response.data.tweet.slice(0, 270);
+  } catch (error) {
+    console.error("Error generating tweet text:", error);
+    throw new Error("Failed to generate tweet content using ChainGPT API");
+  }
+};
+
+export const postTweet = async (accessToken: string, message: string): Promise<TwitterPostResponse> => {
+  try {
+    const response = await axios.post<TwitterPostResponse>(
+      "https://api.twitter.com/2/tweets",
+      { text: message },
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+    return response.data;
+  } catch (error) {
+    throw enrichTwitterError(error);
+  }
+};
+
+export const generateAndPostTweet = async (prompt: string) => {
   const tweet = await getTextForTweet(prompt);
-  const token = await getAccessToken();
-  const response = await postTweet(token, tweet);
+  const accessToken = await getAccessToken();
+  const response = await postTweet(accessToken, tweet);
   console.log(`Tweet posted successfully: ${tweet}`);
   return { response, tweet };
 };
 
 export const uploadTwitterPostTweet = async (message: string): Promise<TwitterPostResponse> => {
-  const token = await getAccessToken();
-  const response = await postTweet(token, message);
+  const accessToken = await getAccessToken();
+  const response = await postTweet(accessToken, message);
   console.log(`Tweet posted successfully: ${message}`);
   return response;
 };
+
+/** ---------------- New helpers for mentions & rate limits ---------------- **/
+
+let CACHED_ME_ID: string | null = null;
+
+export async function getMeId(): Promise<string> {
+  if (CACHED_ME_ID) return CACHED_ME_ID;
+  const accessToken = await getAccessToken();
+  const r = await axios.get("https://api.twitter.com/2/users/me", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  CACHED_ME_ID = r.data?.data?.id;
+  return CACHED_ME_ID!;
+}
+
+export function enrichTwitterError(error: any) {
+  const ax = error as AxiosError<any>;
+  const status = ax.response?.status;
+  const headers = ax.response?.headers || {};
+  const resetHeader = headers["x-rate-limit-reset"];
+  const resetMs = resetHeader ? Number(resetHeader) * 1000 : null;
+
+  const e = new Error(ax.response?.data?.detail || ax.message || "Twitter error") as Error & {
+    status?: number;
+    rateLimited?: boolean;
+    resetAt?: number | null;
+  };
+  e.status = status;
+  if (status === 429) {
+    e.rateLimited = true;
+    e.resetAt = resetMs ?? Date.now() + 15 * 60 * 1000; // default 15 min window if header missing
+  }
+  return e;
+}
+
+export async function postTweetReply(
+  accessToken: string,
+  message: string,
+  inReplyToId: string
+): Promise<TwitterPostResponse> {
+  try {
+    const response = await axios.post<TwitterPostResponse>(
+      "https://api.twitter.com/2/tweets",
+      { text: message, reply: { in_reply_to_tweet_id: inReplyToId } },
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+    return response.data;
+  } catch (error) {
+    throw enrichTwitterError(error);
+  }
+}
+
+export type Mention = {
+  id: string;
+  text: string;
+  author_id?: string;
+  created_at?: string;
+};
+
+export async function fetchMentions(accessToken: string, meId: string, sinceId?: string, max = 5): Promise<Mention[]> {
+  try {
+    const url = new URL(`https://api.twitter.com/2/users/${meId}/mentions`);
+    url.searchParams.set("max_results", String(Math.min(25, Math.max(1, max))));
+    url.searchParams.set("tweet.fields", "author_id,created_at");
+    if (sinceId) url.searchParams.set("since_id", sinceId);
+
+    const r = await axios.get(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    return r.data?.data || [];
+  } catch (error) {
+    throw enrichTwitterError(error);
+  }
+}
+
+/** Utility for persona two-liner (fallback if you don't call ChainGPT) */
+export function formatTwoLineReply(source: string): string {
+  // very conservative fallback formatter
+  const clean = source.replace(/\s+/g, " ").trim();
+  const tl = clean.slice(0, 140);
+  const zing = "Smart take, zero fluff.";
+  return `TL;DR: ${tl}\nZinger: ${zing.slice(0, 100)}`;
+}
