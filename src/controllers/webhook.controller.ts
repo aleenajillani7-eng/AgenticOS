@@ -1,3 +1,4 @@
+// src/controllers/webhook.controller.ts
 import { Context } from "hono";
 import axios from "axios";
 import ejs from "ejs";
@@ -6,37 +7,30 @@ import { uploadTwitterPostTweet } from "../services/twitter.service";
 import { ApiResponse, TweetWebhookRequest, WebhookRegistrationRequest } from "../types";
 import { join } from "path";
 
-// ChainGPT API URL
 const CHAINGPT_API_URL = "https://webapi.chaingpt.org";
 
-/**
- * Fetch connected webhook from ChainGPT
- * @returns Connected webhook URL or null
- */
+// --- helpers ---
 async function fetchConnectedWebhook(): Promise<string | null> {
+  if (!env.CHAINGPT_API_KEY) return null;
   try {
-    const response = await axios.get(`${CHAINGPT_API_URL}/webhook-subscription/`, {
+    const res = await axios.get(`${CHAINGPT_API_URL}/webhook-subscription/`, {
       headers: {
         "Content-Type": "application/json",
         "Accept-Encoding": "gzip, deflate",
         "api-key": env.CHAINGPT_API_KEY,
       },
     });
-
-    return response?.data?.webhookUrl || null;
-  } catch (error) {
-    console.error("Error fetching connected webhook:", error);
+    return res?.data?.webhookUrl || null;
+  } catch (err) {
+    console.error("Error fetching connected webhook:", err);
     return null;
   }
 }
 
-/**
- * Fetch all categories and subscribed categories from ChainGPT
- * @returns Object containing all categories with subscription status
- */
 async function fetchCategories(): Promise<any[]> {
+  if (!env.CHAINGPT_API_KEY) return [];
   try {
-    const response = await axios.get(`${CHAINGPT_API_URL}/category-subscription`, {
+    const res = await axios.get(`${CHAINGPT_API_URL}/category-subscription`, {
       headers: {
         "Content-Type": "application/json",
         "Accept-Encoding": "gzip, deflate",
@@ -44,189 +38,122 @@ async function fetchCategories(): Promise<any[]> {
       },
     });
 
-    const allCategories = response?.data?.allCategories || [];
-    const subscribedCategories = response?.data?.subscribedCategories || [];
-
-    // Add isSubscribed property to allCategories
-    return allCategories.map((category: any) => ({
-      ...category,
-      isSubscribed: subscribedCategories.some(
-        (subscribedCategory: any) => subscribedCategory?.categoryId === category?.id
-      ),
+    const allCategories = res?.data?.allCategories || [];
+    const subscribed = res?.data?.subscribedCategories || [];
+    return allCategories.map((c: any) => ({
+      ...c,
+      isSubscribed: subscribed.some((s: any) => s?.categoryId === c?.id),
     }));
-  } catch (error) {
-    console.error("Error fetching categories:", error);
+  } catch (err) {
+    console.error("Error fetching categories:", err);
     return [];
   }
 }
 
-/**
- * Register a webhook with ChainGPT
- * @param c - Hono context
- * @returns Response with registration result
- */
+// --- API handlers used by your UI JS ---
 export const registerWebhook = async (c: Context): Promise<Response> => {
   try {
     const { url } = await c.req.json<WebhookRegistrationRequest>();
-
     if (!url) {
-      return c.json<ApiResponse>(
-        {
-          success: false,
-          message: "URL is required",
-          error: "Missing required field: url",
-        },
-        400
-      );
+      return c.json<ApiResponse>({ success: false, message: "URL is required", error: "Missing url" }, 400);
+    }
+    if (!env.CHAINGPT_API_KEY) {
+      return c.json<ApiResponse>({ success: false, message: "CHAINGPT_API_KEY not set" }, 400);
     }
 
-    const response = await axios.post(
-      `${CHAINGPT_API_URL}/webhook-subscription/register`,
-      { url },
-      {
-        headers: {
-          "api-key": env.CHAINGPT_API_KEY,
-        },
-      }
-    );
-
-    return c.json<ApiResponse>({
-      success: true,
-      message: "Webhook registered successfully",
-      data: response.data,
+    const res = await axios.post(`${CHAINGPT_API_URL}/webhook-subscription/register`, { url }, {
+      headers: { "api-key": env.CHAINGPT_API_KEY },
     });
-  } catch (error) {
-    console.error("Error registering webhook:", error);
 
-    return c.json<ApiResponse>(
-      {
-        success: false,
-        message: "Failed to register webhook",
-        error: error instanceof Error ? error.message : "Unknown error",
-      },
-      500
-    );
+    return c.json<ApiResponse>({ success: true, message: "Webhook registered", data: res.data });
+  } catch (error: any) {
+    console.error("Error registering webhook:", error);
+    return c.json<ApiResponse>({
+      success: false,
+      message: "Failed to register webhook",
+      error: error?.message || "Unknown error",
+    }, 500);
   }
 };
 
-/**
- * Handle incoming webhook requests for posting tweets
- * @param c - Hono context
- * @returns Response with tweet result
- */
+export const subscribeToCategories = async (c: Context): Promise<Response> => {
+  try {
+    const { categoryIds } = await c.req.json();
+    if (!Array.isArray(categoryIds)) {
+      return c.json<ApiResponse>({ success: false, message: "categoryIds must be an array" }, 400);
+    }
+    if (!env.CHAINGPT_API_KEY) {
+      return c.json<ApiResponse>({ success: false, message: "CHAINGPT_API_KEY not set" }, 400);
+    }
+
+    const res = await axios.post(`${CHAINGPT_API_URL}/category-subscription/subscribe`, { categoryIds }, {
+      headers: { "api-key": env.CHAINGPT_API_KEY },
+    });
+
+    return c.json<ApiResponse>({ success: true, message: "Categories subscribed", data: res.data });
+  } catch (error: any) {
+    console.error("Error subscribing to categories:", error);
+    return c.json<ApiResponse>({
+      success: false,
+      message: "Failed to subscribe to categories",
+      error: error?.message || "Unknown error",
+    }, 500);
+  }
+};
+
+// Public endpoint to receive external webhook -> post to X
 export const tweetWebhook = async (c: Context): Promise<Response> => {
   try {
     const { tweet } = await c.req.json<TweetWebhookRequest>();
-
     if (!tweet) {
-      return c.json<ApiResponse>(
-        {
-          success: false,
-          message: "Tweet content is required",
-          error: "Missing required field: tweet",
-        },
-        400
-      );
+      return c.json<ApiResponse>({ success: false, message: "tweet is required", error: "Missing tweet" }, 400);
     }
-
-    let tweetText = tweet;
-    //  let tweetText = tweet.slice(0, 270);
-
+    const tweetText = tweet; // you can trim if needed
     const response = await uploadTwitterPostTweet(tweetText);
-
-    return c.json<ApiResponse>({
-      success: true,
-      message: "Tweet posted successfully",
-      data: { tweetText, response },
-    });
-  } catch (error) {
+    return c.json<ApiResponse>({ success: true, message: "Tweet posted", data: { tweetText, response } });
+  } catch (error: any) {
     console.error("Error posting tweet via webhook:", error);
-
-    return c.json<ApiResponse>(
-      {
-        success: false,
-        message: "Failed to post tweet",
-        error: error instanceof Error ? error.message : "Unknown error",
-      },
-      500
-    );
+    return c.json<ApiResponse>({ success: false, message: "Failed to post tweet", error: error?.message }, 500);
   }
 };
 
-/**
- * Get the current schedule configuration
- */
+// View: /dashboard/live-news
 export const renderLiveNews = async (c: Context): Promise<Response> => {
   try {
-    // Fetch categories and webhook in parallel
-    const [categories, currentWebhookUrl] = await Promise.all([fetchCategories(), fetchConnectedWebhook()]);
+    const [categories, currentWebhookUrl] = await Promise.all([
+      fetchCategories(),
+      fetchConnectedWebhook(),
+    ]);
 
-    // First render the scheduler content
-    const liveNewsContent = await ejs.renderFile(join(import.meta.dir, "../../views/live-news.ejs"), {
+    // Render body
+    const body = await ejs.renderFile(join(import.meta.dir, "../../views/live-news.ejs"), {
       title: "Live News",
       data: categories,
       currentWebhookUrl,
     });
 
-    // Then inject it into the layout
+    // Wrap in layout
     const html = await ejs.renderFile(join(import.meta.dir, "../../views/layout.ejs"), {
       title: "Live News",
-      body: liveNewsContent,
+      body,
       path: c.req.path,
     });
 
     return c.html(html);
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error rendering live news:", error);
-    throw new Error("Failed to render live news");
-  }
-};
 
-/**
- * Subscribe to selected categories
- * @param c - Hono context
- * @returns Response with subscription result
- */
-export const subscribeToCategories = async (c: Context): Promise<Response> => {
-  try {
-    const { categoryIds } = await c.req.json();
-
-    if (!categoryIds || !Array.isArray(categoryIds)) {
-      return c.json<ApiResponse>(
-        {
-          success: false,
-          message: "Category IDs are required and must be an array",
-          error: "Invalid or missing categoryIds",
-        },
-        400
-      );
-    }
-
-    const response = await axios.post(
-      `${CHAINGPT_API_URL}/category-subscription/subscribe`,
-      { categoryIds },
-      {
-        headers: {
-          "api-key": env.CHAINGPT_API_KEY,
-        },
-      }
-    );
-
-    return c.json<ApiResponse>({
-      success: true,
-      message: "Categories subscribed successfully",
-      data: response.data,
+    // Graceful fallback: render the page with empty data instead of 500
+    const body = await ejs.renderFile(join(import.meta.dir, "../../views/live-news.ejs"), {
+      title: "Live News",
+      data: [],
+      currentWebhookUrl: null,
     });
-  } catch (error) {
-    console.error("Error subscribing to categories:", error);
-
-    return c.json<ApiResponse>(
-      {
-        success: false,
-        message: "Failed to subscribe to categories",
-        error: error instanceof Error ? error.message : "Unknown error",
-      },
-      500
-    );
+    const html = await ejs.renderFile(join(import.meta.dir, "../../views/layout.ejs"), {
+      title: "Live News",
+      body,
+      path: c.req.path,
+    });
+    return c.html(html);
   }
 };
