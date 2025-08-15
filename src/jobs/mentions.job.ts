@@ -1,182 +1,137 @@
 // src/jobs/mentions.job.ts
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from "fs";
+import { join } from "path";
 import { schedule, ScheduledTask } from "node-cron";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
-import { TOKENS_FILE_PATH } from "../utils/encryption";
-import { getSelfUserId, fetchMentions, postReply } from "../services/twitter.service";
-import { craftTLDRabbitReply } from "../services/persona.service";
+import {
+  getAccessToken,
+  getMeId,
+  fetchMentions,
+  postTweetReply,
+  formatTwoLineReply,
+} from "../services/twitter.service";
 
-type State = {
-  sinceId?: string;
-  nextAllowedAt?: number; // epoch ms backoff window
-  me?: string;            // cached self id
-  lastRunAt?: number;     // last manual run ts
+const STATE_DIR = join(import.meta.dir, "../../data");
+const STATE_PATH = join(STATE_DIR, "mentions-state.json");
+
+type MentionsState = {
+  lastSeenId?: string;
+  nextAllowedAt?: number; // when rate-limit lifts (ms epoch)
 };
 
-const STATE_PATH = join(dirname(TOKENS_FILE_PATH), "mentions-state.json");
+const state: MentionsState = loadState();
+let cronJob: ScheduledTask | null = null;
+let running = false;
 
-// Be very gentle at first
-const MAX_REPLIES_PER_CYCLE = 1;
-
-// Poll every 5 minutes (reduce background pressure; you can tighten later)
-const CRON_EXPR = "*/5 * * * *";
-
-// Manual “Run Now” cooldown to avoid button-spam
-const MANUAL_COOLDOWN_MS = 60_000;
-
-// If headers don't provide reset, fallback duration:
-const RATE_LIMIT_FALLBACK_MS = 120_000;
-
-let job: ScheduledTask | null = null;
-
-function loadState(): State {
+function loadState(): MentionsState {
   try {
+    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
     if (!existsSync(STATE_PATH)) return {};
-    return JSON.parse(readFileSync(STATE_PATH, "utf8")) as State;
+    const raw = readFileSync(STATE_PATH, "utf8");
+    return JSON.parse(raw);
   } catch {
     return {};
   }
 }
-function saveState(s: State) {
+
+function saveState() {
   try {
-    mkdirSync(dirname(STATE_PATH), { recursive: true });
-    writeFileSync(STATE_PATH, JSON.stringify(s), "utf8");
+    writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
   } catch (e) {
-    console.error("[mentions] Failed saving state:", e);
+    console.error("[mentions] failed to save state:", e);
   }
-}
-function nextAllowedFromError(err: any): number {
-  const headers = err?.response?.headers || {};
-  const ra = headers["retry-after"];
-  if (ra) return Date.now() + Number(ra) * 1000 + 1500; // small cushion
-  const reset = headers["x-rate-limit-reset"];
-  if (reset) {
-    const wait = Number(reset) * 1000 - Date.now() + 1500;
-    if (wait > 0) return Date.now() + wait;
-  }
-  return Date.now() + RATE_LIMIT_FALLBACK_MS;
 }
 
-export async function runMentionsOnce(opts?: { manual?: boolean }): Promise<{
+function ms(ms: number) {
+  const s = Math.round(ms / 1000);
+  return `${s}s`;
+}
+
+/** Generate reply text. Swap with your LLM call if desired. */
+function buildReplyText(sourceText: string): string {
+  // You can plug your ChainGPT call here to produce the exact 2-liner.
+  return formatTwoLineReply(sourceText || "");
+}
+
+/** Runs one pass: fetch new mentions and reply to at most 1 */
+export async function runMentionsOnce(): Promise<{
   handled: number;
   lastId?: string;
-  skipped?: string;
+  skipped?: "cooldown" | "rate_limited" | "empty";
   nextAllowedAt?: number;
 }> {
-  const manual = !!opts?.manual;
-  const state = loadState();
-
-  // honor persisted backoff
-  if (state.nextAllowedAt && Date.now() < state.nextAllowedAt) {
-    return {
-      handled: 0,
-      lastId: state.sinceId,
-      skipped: `backoff_active_${state.nextAllowedAt - Date.now()}ms`,
-      nextAllowedAt: state.nextAllowedAt,
-    };
-  }
-
-  // manual cooldown
-  if (manual && state.lastRunAt && Date.now() - state.lastRunAt < MANUAL_COOLDOWN_MS) {
-    return {
-      handled: 0,
-      lastId: state.sinceId,
-      skipped: `manual_cooldown_${MANUAL_COOLDOWN_MS - (Date.now() - state.lastRunAt)}ms`,
-    };
-  }
+  if (running) return { handled: 0, skipped: "cooldown", nextAllowedAt: state.nextAllowedAt };
+  running = true;
 
   try {
-    // cache self id in state (backup to service cache)
-    let me = state.me;
-    if (!me) {
-      me = await getSelfUserId();
-      state.me = me;
-      saveState(state);
+    // Respect rate-limit cooldown
+    if (state.nextAllowedAt && Date.now() < state.nextAllowedAt) {
+      return { handled: 0, skipped: "rate_limited", nextAllowedAt: state.nextAllowedAt };
     }
 
-    const mentions = await fetchMentions(me!, state.sinceId);
-    if (!mentions.length) {
-      state.lastRunAt = Date.now();
-      saveState(state);
-      return { handled: 0, lastId: state.sinceId };
-    }
+    const accessToken = await getAccessToken();
+    const meId = await getMeId();
 
-    // oldest → newest
-    mentions.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-    const batch = mentions.slice(0, MAX_REPLIES_PER_CYCLE);
+    const mentions = await fetchMentions(accessToken, meId, state.lastSeenId, 5);
+    if (!mentions.length) return { handled: 0, skipped: "empty", lastId: state.lastSeenId };
+
+    // process newest last so lastSeenId moves forward monotonically
+    mentions.sort((a, b) => BigInt(a.id) < BigInt(b.id) ? -1 : 1);
 
     let handled = 0;
-    let lastSuccessfulId = state.sinceId;
+    let maxId = state.lastSeenId ? BigInt(state.lastSeenId) : 0n;
 
-    for (const m of batch) {
-      if (m.author_id === me) {
-        lastSuccessfulId = m.id; // advance past self tweets
-        continue;
-      }
-
-      const reply = craftTLDRabbitReply(m.text);
+    for (const m of mentions) {
+      if (handled >= 1) break; // cap per pass to be gentle
 
       try {
-        await postReply(reply, m.id);
+        const text = buildReplyText(m.text || "");
+        await postTweetReply(accessToken, text, m.id);
         handled++;
-        lastSuccessfulId = m.id; // advance checkpoint only on success
-      } catch (err: any) {
-        // Persist backoff & retry same tweet later (do NOT advance sinceId)
-        if (err?.response?.status === 429) {
-          const next = nextAllowedFromError(err);
-          state.nextAllowedAt = next;
-          state.lastRunAt = Date.now();
-          saveState(state);
-          return { handled, lastId: lastSuccessfulId, skipped: "rate_limited", nextAllowedAt: next };
+        if (BigInt(m.id) > maxId) maxId = BigInt(m.id);
+        console.log(`[mentions] replied to ${m.id}`);
+      } catch (e: any) {
+        if (e?.rateLimited) {
+          state.nextAllowedAt = e.resetAt ?? Date.now() + 15 * 60 * 1000;
+          saveState();
+          console.warn(`[rate-limit] 429: backing off until ${new Date(state.nextAllowedAt!).toISOString()}`);
+          return { handled, skipped: "rate_limited", nextAllowedAt: state.nextAllowedAt };
         }
-        console.error("[mentions] Failed to reply:", err?.message || err);
-        // non-429: do not advance sinceId; retry next cycle
+        console.error("[mentions] reply error:", e?.message || e);
       }
     }
 
-    // after batch succeeds, advance to last successful id
-    state.sinceId = lastSuccessfulId;
-    state.lastRunAt = Date.now();
-    saveState(state);
-
-    return { handled, lastId: lastSuccessfulId };
-  } catch (e: any) {
-    // If the GET mentions call hit 429 after retries, persist backoff
-    if (e?.response?.status === 429) {
-      const next = nextAllowedFromError(e);
-      const s2 = loadState();
-      s2.nextAllowedAt = next;
-      s2.lastRunAt = Date.now();
-      saveState(s2);
-      return { handled: 0, lastId: s2.sinceId, skipped: "rate_limited", nextAllowedAt: next };
+    if (maxId > 0n) {
+      state.lastSeenId = maxId.toString();
+      saveState();
     }
-    console.error("[mentions] runMentionsOnce error:", e?.message || e);
-    return { handled: 0 };
+    return { handled, lastId: state.lastSeenId };
+  } finally {
+    running = false;
   }
 }
 
-export function startMentionsJob(): void {
-  if (job) {
-    console.log("[mentions] job already running");
-    return;
-  }
-  job = schedule(CRON_EXPR, async () => {
-    try {
-      const res = await runMentionsOnce();
-      if (res.handled) {
-        console.log(`[mentions] Replied to ${res.handled} mention(s). sinceId=${res.lastId}`);
-      }
-    } catch (e) {
-      console.error("[mentions] cron cycle error:", e);
-    }
+/** Cron every 3 minutes (gentle); serializes calls */
+export function startMentionsJob() {
+  if (cronJob) cronJob.stop();
+  cronJob = schedule("*/3 * * * *", async () => {
+    const r = await runMentionsOnce();
+    const tag = r.skipped ? `skipped:${r.skipped}` : `handled:${r.handled}`;
+    console.log(`[mentions] tick -> ${tag}${r.nextAllowedAt ? ` next:${new Date(r.nextAllowedAt).toISOString()}` : ""}`);
   });
-  console.log(`[mentions] job scheduled: ${CRON_EXPR}`);
+  console.log("[mentions] job scheduled: */3 * * * *");
 }
 
-export function stopMentionsJob(): void {
-  if (job) {
-    job.stop();
-    job = null;
-    console.log("[mentions] job stopped");
-  }
+export function stopMentionsJob() {
+  cronJob?.stop();
+  cronJob = null;
+  console.log("[mentions] job stopped");
+}
+
+/** simple status for dashboard */
+export function getMentionsStatus() {
+  return {
+    running: !!cronJob,
+    nextAllowedAt: state.nextAllowedAt ?? null,
+    lastSeenId: state.lastSeenId ?? null,
+  };
 }
