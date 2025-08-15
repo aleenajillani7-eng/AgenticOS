@@ -15,16 +15,16 @@ type State = {
 
 const STATE_PATH = join(dirname(TOKENS_FILE_PATH), "mentions-state.json");
 
-// Be extra gentle to avoid 429s. You can raise later.
+// Be very gentle at first
 const MAX_REPLIES_PER_CYCLE = 1;
 
-// Poll every 5 minutes to reduce pressure (you can move this to */3 or */1 later).
+// Poll every 5 minutes (reduce background pressure; you can tighten later)
 const CRON_EXPR = "*/5 * * * *";
 
 // Manual “Run Now” cooldown to avoid button-spam
 const MANUAL_COOLDOWN_MS = 60_000;
 
-// Fallback backoff if Twitter doesn't send Retry-After
+// If headers don't provide reset, fallback duration:
 const RATE_LIMIT_FALLBACK_MS = 120_000;
 
 let job: ScheduledTask | null = null;
@@ -46,9 +46,15 @@ function saveState(s: State) {
   }
 }
 function nextAllowedFromError(err: any): number {
-  const ra = err?.response?.headers?.["retry-after"];
-  const ms = ra ? Number(ra) * 1000 : RATE_LIMIT_FALLBACK_MS;
-  return Date.now() + ms;
+  const headers = err?.response?.headers || {};
+  const ra = headers["retry-after"];
+  if (ra) return Date.now() + Number(ra) * 1000 + 1500; // small cushion
+  const reset = headers["x-rate-limit-reset"];
+  if (reset) {
+    const wait = Number(reset) * 1000 - Date.now() + 1500;
+    if (wait > 0) return Date.now() + wait;
+  }
+  return Date.now() + RATE_LIMIT_FALLBACK_MS;
 }
 
 export async function runMentionsOnce(opts?: { manual?: boolean }): Promise<{
@@ -80,7 +86,7 @@ export async function runMentionsOnce(opts?: { manual?: boolean }): Promise<{
   }
 
   try {
-    // cache self id (as backup to service cache)
+    // cache self id in state (backup to service cache)
     let me = state.me;
     if (!me) {
       me = await getSelfUserId();
@@ -95,45 +101,47 @@ export async function runMentionsOnce(opts?: { manual?: boolean }): Promise<{
       return { handled: 0, lastId: state.sinceId };
     }
 
-    // oldest → newest, then cap
+    // oldest → newest
     mentions.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
     const batch = mentions.slice(0, MAX_REPLIES_PER_CYCLE);
 
     let handled = 0;
-    // advance checkpoint only on successful replies
     let lastSuccessfulId = state.sinceId;
 
     for (const m of batch) {
       if (m.author_id === me) {
-        lastSuccessfulId = m.id;
+        lastSuccessfulId = m.id; // advance past self tweets
         continue;
       }
 
       const reply = craftTLDRabbitReply(m.text);
+
       try {
         await postReply(reply, m.id);
         handled++;
-        lastSuccessfulId = m.id;
+        lastSuccessfulId = m.id; // advance checkpoint only on success
       } catch (err: any) {
+        // Persist backoff & retry same tweet later (do NOT advance sinceId)
         if (err?.response?.status === 429) {
           const next = nextAllowedFromError(err);
           state.nextAllowedAt = next;
           state.lastRunAt = Date.now();
-          // DO NOT advance sinceId here — we’ll retry this tweet after backoff
           saveState(state);
           return { handled, lastId: lastSuccessfulId, skipped: "rate_limited", nextAllowedAt: next };
         }
         console.error("[mentions] Failed to reply:", err?.message || err);
-        // keep lastSuccessfulId unchanged so we retry next run
+        // non-429: do not advance sinceId; retry next cycle
       }
     }
 
+    // after batch succeeds, advance to last successful id
     state.sinceId = lastSuccessfulId;
     state.lastRunAt = Date.now();
     saveState(state);
 
     return { handled, lastId: lastSuccessfulId };
   } catch (e: any) {
+    // If the GET mentions call hit 429 after retries, persist backoff
     if (e?.response?.status === 429) {
       const next = nextAllowedFromError(e);
       const s2 = loadState();
