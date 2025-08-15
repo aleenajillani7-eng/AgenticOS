@@ -7,17 +7,22 @@ import { TwitterOAuthResponse, TwitterPostResponse } from "../types";
 // ChainGPT API URL
 const CHAINGPT_API_URL = "https://webapi.chaingpt.org";
 
-/** ---------------- Existing helpers you already had ---------------- **/
+/* =========================
+   ACCESS TOKENS
+   ========================= */
+
 export const getAccessToken = async (): Promise<string> => {
   try {
     const tokens = await loadTokens(env.ENCRYPTION_KEY);
 
+    // Try current access token
     try {
       await axios.get("https://api.twitter.com/2/users/me", {
         headers: { Authorization: `Bearer ${tokens.accessToken}` },
       });
       return tokens.accessToken;
     } catch {
+      // Refresh if expired
       const newTokens = await refreshAccessToken(tokens.refreshToken);
       await saveTokens(newTokens.accessToken, newTokens.refreshToken, env.ENCRYPTION_KEY);
       return newTokens.accessToken;
@@ -28,7 +33,9 @@ export const getAccessToken = async (): Promise<string> => {
   }
 };
 
-export const refreshAccessToken = async (refreshToken: string) => {
+export const refreshAccessToken = async (
+  refreshToken: string
+): Promise<{ accessToken: string; refreshToken: string }> => {
   try {
     const params = new URLSearchParams();
     params.append("refresh_token", refreshToken);
@@ -50,6 +57,10 @@ export const refreshAccessToken = async (refreshToken: string) => {
   }
 };
 
+/* =========================
+   TWEET GENERATION (ChainGPT)
+   ========================= */
+
 export const getTextForTweet = async (prompt: string): Promise<string> => {
   try {
     const response = await axios.post(
@@ -57,13 +68,17 @@ export const getTextForTweet = async (prompt: string): Promise<string> => {
       { prompt },
       { headers: { "Content-Type": "application/json", "api-key": env.CHAINGPT_API_KEY } }
     );
-    // Trim to safe length for base tier
-    return response.data.tweet.slice(0, 270);
+    // Trim for base-tier limits
+    return (response.data?.tweet || "").slice(0, 270);
   } catch (error) {
     console.error("Error generating tweet text:", error);
     throw new Error("Failed to generate tweet content using ChainGPT API");
   }
 };
+
+/* =========================
+   POST TWEETS
+   ========================= */
 
 export const postTweet = async (accessToken: string, message: string): Promise<TwitterPostResponse> => {
   try {
@@ -78,7 +93,26 @@ export const postTweet = async (accessToken: string, message: string): Promise<T
   }
 };
 
-export const generateAndPostTweet = async (prompt: string) => {
+export const postTweetReply = async (
+  accessToken: string,
+  message: string,
+  inReplyToId: string
+): Promise<TwitterPostResponse> => {
+  try {
+    const response = await axios.post<TwitterPostResponse>(
+      "https://api.twitter.com/2/tweets",
+      { text: message, reply: { in_reply_to_tweet_id: inReplyToId } },
+      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
+    );
+    return response.data;
+  } catch (error) {
+    throw enrichTwitterError(error);
+  }
+};
+
+export const generateAndPostTweet = async (
+  prompt: string
+): Promise<{ response: TwitterPostResponse; tweet: string }> => {
   const tweet = await getTextForTweet(prompt);
   const accessToken = await getAccessToken();
   const response = await postTweet(accessToken, tweet);
@@ -93,10 +127,13 @@ export const uploadTwitterPostTweet = async (message: string): Promise<TwitterPo
   return response;
 };
 
-/** ---------------- New helpers for mentions & rate limits ---------------- **/
+/* =========================
+   USER & MENTIONS HELPERS
+   ========================= */
 
 let CACHED_ME_ID: string | null = null;
 
+/** Preferred export used in newer code */
 export async function getMeId(): Promise<string> {
   if (CACHED_ME_ID) return CACHED_ME_ID;
   const accessToken = await getAccessToken();
@@ -107,41 +144,9 @@ export async function getMeId(): Promise<string> {
   return CACHED_ME_ID!;
 }
 
-export function enrichTwitterError(error: any) {
-  const ax = error as AxiosError<any>;
-  const status = ax.response?.status;
-  const headers = ax.response?.headers || {};
-  const resetHeader = headers["x-rate-limit-reset"];
-  const resetMs = resetHeader ? Number(resetHeader) * 1000 : null;
-
-  const e = new Error(ax.response?.data?.detail || ax.message || "Twitter error") as Error & {
-    status?: number;
-    rateLimited?: boolean;
-    resetAt?: number | null;
-  };
-  e.status = status;
-  if (status === 429) {
-    e.rateLimited = true;
-    e.resetAt = resetMs ?? Date.now() + 15 * 60 * 1000; // default 15 min window if header missing
-  }
-  return e;
-}
-
-export async function postTweetReply(
-  accessToken: string,
-  message: string,
-  inReplyToId: string
-): Promise<TwitterPostResponse> {
-  try {
-    const response = await axios.post<TwitterPostResponse>(
-      "https://api.twitter.com/2/tweets",
-      { text: message, reply: { in_reply_to_tweet_id: inReplyToId } },
-      { headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } }
-    );
-    return response.data;
-  } catch (error) {
-    throw enrichTwitterError(error);
-  }
+/** Back-compat alias for older imports in your repo */
+export async function getSelfUserId(): Promise<string> {
+  return getMeId();
 }
 
 export type Mention = {
@@ -151,7 +156,12 @@ export type Mention = {
   created_at?: string;
 };
 
-export async function fetchMentions(accessToken: string, meId: string, sinceId?: string, max = 5): Promise<Mention[]> {
+export async function fetchMentions(
+  accessToken: string,
+  meId: string,
+  sinceId?: string,
+  max = 5
+): Promise<Mention[]> {
   try {
     const url = new URL(`https://api.twitter.com/2/users/${meId}/mentions`);
     url.searchParams.set("max_results", String(Math.min(25, Math.max(1, max))));
@@ -168,10 +178,33 @@ export async function fetchMentions(accessToken: string, meId: string, sinceId?:
   }
 }
 
-/** Utility for persona two-liner (fallback if you don't call ChainGPT) */
+/* =========================
+   ERRORS & FALLBACK FORMATTER
+   ========================= */
+
+export function enrichTwitterError(error: any) {
+  const ax = error as AxiosError<any>;
+  const status = ax.response?.status;
+  const headers = ax.response?.headers || {};
+  const resetHeader = headers["x-rate-limit-reset"];
+  const resetMs = resetHeader ? Number(resetHeader) * 1000 : null;
+
+  const e = new Error(ax.response?.data?.detail || ax.message || "Twitter error") as Error & {
+    status?: number;
+    rateLimited?: boolean;
+    resetAt?: number | null;
+  };
+  e.status = status;
+  if (status === 429) {
+    e.rateLimited = true;
+    e.resetAt = resetMs ?? Date.now() + 15 * 60 * 1000; // fallback 15m
+  }
+  return e;
+}
+
+/** Super-safe deterministic two-liner (used if you don’t call ChainGPT) */
 export function formatTwoLineReply(source: string): string {
-  // very conservative fallback formatter
-  const clean = source.replace(/\s+/g, " ").trim();
+  const clean = (source || "").replace(/\s+/g, " ").trim();
   const tl = clean.slice(0, 140);
   const zing = "Smart take, zero fluff.";
   return `TL;DR: ${tl}\nZinger: ${zing.slice(0, 100)}`;
