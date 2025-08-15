@@ -7,11 +7,11 @@ import { TOKENS_FILE_PATH, loadTokens } from "../utils/encryption";
 
 export const authRouter = new Hono();
 
-// Start OAuth (also allow /login as alias)
+// Start OAuth (+ alias)
 authRouter.get("/", (c) => c.redirect(getAuthUrl()));
 authRouter.get("/login", (c) => c.redirect(getAuthUrl()));
 
-// OAuth callback — save tokens, do NOT return them
+// Callback: save tokens, do NOT return them
 authRouter.get("/callback", async (c) => {
   try {
     const url = new URL(c.req.url);
@@ -28,26 +28,22 @@ authRouter.get("/callback", async (c) => {
   }
 });
 
-// -------- Diagnostics (no secrets) --------
-
-// File exists?
+// Diagnostics
 authRouter.get("/status", (c) => {
   const present = existsSync(TOKENS_FILE_PATH);
   return c.json({ tokensPresent: present, path: TOKENS_FILE_PATH });
 });
 
-// Can decrypt with current ENCRYPTION_KEY?
 authRouter.get("/probe", async (c) => {
   try {
     const key = process.env.ENCRYPTION_KEY || "";
     await loadTokens(key);
-    return c.json({ ok: true, canDecrypt: true });
+    return c.json({ ok: true, canDecrypt: true, path: TOKENS_FILE_PATH });
   } catch (e: any) {
-    return c.json({ ok: false, canDecrypt: false, error: e?.message || "decrypt failed" }, 500);
+    return c.json({ ok: false, canDecrypt: false, error: e?.message || "decrypt failed", path: TOKENS_FILE_PATH }, 500);
   }
 });
 
-// Is /data writable? Is key set? (detect missing disk or env)
 authRouter.get("/debug", (c) => {
   const dir = dirname(TOKENS_FILE_PATH);
   let canWrite = false;
@@ -67,7 +63,7 @@ authRouter.get("/debug", (c) => {
   });
 });
 
-// Danger reset (deletes tokens file). Use: /api/auth/reset?confirm=DELETE
+// Reset tokens (dangerous)
 authRouter.get("/reset", (c) => {
   const url = new URL(c.req.url);
   const confirm = url.searchParams.get("confirm");
