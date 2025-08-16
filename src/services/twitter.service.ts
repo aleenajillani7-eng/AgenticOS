@@ -4,14 +4,14 @@ import { env } from "../config/env";
 import { loadTokens, saveTokens } from "../utils/encryption";
 import { TwitterOAuthResponse, TwitterPostResponse } from "../types";
 
-// ---------------- Constants ----------------
+// =============== Constants ===============
 const CHAINGPT_API_URL = "https://webapi.chaingpt.org";
 
-// ---------------- In-memory caches ----------------
+// =============== Small in-memory caches ===============
 let ACCESS_TOKEN_CACHE: string | null = null;
 let SELF_USER_ID_CACHE: string | null = null;
 
-// ---------------- Token helpers ----------------
+// =============== Token helpers ===============
 async function ensureAccessToken(): Promise<{ accessToken: string; refreshToken: string }> {
   const t = await loadTokens(env.ENCRYPTION_KEY);
   if (!ACCESS_TOKEN_CACHE) ACCESS_TOKEN_CACHE = t.accessToken;
@@ -43,7 +43,7 @@ async function refreshAccessTokenInternal(refreshToken: string): Promise<string>
   return newAccess;
 }
 
-// Public refresh (kept for other imports)
+// Keep your public refresh function (used elsewhere)
 export const refreshAccessToken = async (
   refreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string }> => {
@@ -71,6 +71,7 @@ export const refreshAccessToken = async (
   return { accessToken, refreshToken: newRefresh };
 };
 
+// Keep this export for compatibility (now it just returns cached/loaded token)
 export const getAccessToken = async (): Promise<string> => {
   try {
     const t = await ensureAccessToken();
@@ -81,7 +82,7 @@ export const getAccessToken = async (): Promise<string> => {
   }
 };
 
-// ---------------- Rate-limit helpers ----------------
+// =============== Rate-limit helpers ===============
 function resetTimestampFromHeaders(headers: Record<string, any>): number | null {
   const reset = headers["x-rate-limit-reset"];
   if (reset) return Number(reset) * 1000;
@@ -108,7 +109,7 @@ function enrichTwitterError(ax: AxiosError) {
   return err;
 }
 
-// ---------------- Request wrapper w/ auto-refresh & 429 backoff ----------------
+// =============== Single request wrapper ===============
 async function twitterRequest<T>(
   req: AxiosRequestConfig,
   opts: { retry401?: boolean; retry429?: boolean } = { retry401: true, retry429: true }
@@ -153,7 +154,7 @@ async function twitterRequest<T>(
   }
 }
 
-// ---------------- Twitter API helpers ----------------
+// =============== Twitter endpoints (use wrapper) ===============
 export const postTweet = async (
   _accessToken: string, // kept for signature compatibility
   message: string
@@ -179,28 +180,6 @@ export async function postReply(
   });
 }
 
-// Backward-compat shim for any old imports using different arg order/signature
-export function postTweetReply(
-  a: string,
-  b: string,
-  c?: string
-): Promise<TwitterPostResponse> {
-  // Accept either (accessToken, message, inReplyToTweetId) or (inReplyToTweetId, message)
-  let message: string;
-  let inReplyToTweetId: string;
-
-  if (c !== undefined) {
-    // (accessToken, message, inReplyToTweetId)
-    message = b;
-    inReplyToTweetId = c;
-  } else {
-    // (inReplyToTweetId, message)
-    inReplyToTweetId = a;
-    message = b;
-  }
-  return postReply("", message, inReplyToTweetId);
-}
-
 export async function replyToTweet(inReplyToTweetId: string, message: string) {
   return postReply("", message, inReplyToTweetId);
 }
@@ -215,10 +194,10 @@ export async function getSelfUserId(): Promise<string> {
   return SELF_USER_ID_CACHE;
 }
 
-// Backward-compat alias for legacy imports
+// 👉 Backward-compat alias to satisfy old imports:
 export const getMeId = getSelfUserId;
 
-// ---------------- Content generation (ChainGPT) ----------------
+// =============== Content generation (ChainGPT) ===============
 export const getTextForTweet = async (prompt: string): Promise<string> => {
   try {
     const response = await axios.post(
@@ -244,7 +223,7 @@ export async function generateFreeformReply(prompt: string): Promise<string> {
   return getTextForTweet(prompt);
 }
 
-// ---------------- High-level helpers used by jobs ----------------
+// =============== High-level helpers for your jobs ===============
 export const generateAndPostTweet = async (
   prompt: string
 ): Promise<{ response: TwitterPostResponse; tweet: string }> => {
