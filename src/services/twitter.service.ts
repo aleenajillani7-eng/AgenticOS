@@ -293,3 +293,7 @@ export const uploadTwitterPostTweet = async (message: string): Promise<TwitterPo
   console.log(`Tweet posted successfully: ${message}`);
   return response;
 };
+
+// ---- Compatibility aliases (avoid import errors in other files) ----
+export const postTweetReply = postReply;
+export const getMeId = getSelfUserId;
