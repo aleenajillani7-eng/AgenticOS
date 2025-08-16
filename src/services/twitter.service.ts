@@ -1,206 +1,109 @@
 // src/services/twitter.service.ts
-import axios, { AxiosError, AxiosRequestConfig } from "axios";
+import axios, { AxiosError } from "axios";
 import { env } from "../config/env";
 import { loadTokens, saveTokens } from "../utils/encryption";
 import { TwitterOAuthResponse, TwitterPostResponse } from "../types";
 
-// =============== Constants ===============
+/**
+ * ChainGPT API base (for text generation you already use in scheduler)
+ */
 const CHAINGPT_API_URL = "https://webapi.chaingpt.org";
 
-// =============== Small in-memory caches ===============
-let ACCESS_TOKEN_CACHE: string | null = null;
-let SELF_USER_ID_CACHE: string | null = null;
-
-// =============== Token helpers ===============
-async function ensureAccessToken(): Promise<{ accessToken: string; refreshToken: string }> {
-  const t = await loadTokens(env.ENCRYPTION_KEY);
-  if (!ACCESS_TOKEN_CACHE) ACCESS_TOKEN_CACHE = t.accessToken;
-  return { accessToken: ACCESS_TOKEN_CACHE, refreshToken: t.refreshToken };
-}
-
-async function refreshAccessTokenInternal(refreshToken: string): Promise<string> {
-  const params = new URLSearchParams();
-  params.append("refresh_token", refreshToken);
-  params.append("grant_type", "refresh_token");
-  params.append("client_id", env.TWITTER_CLIENT_ID);
-
-  const resp = await axios.post<TwitterOAuthResponse>(
-    "https://api.twitter.com/2/oauth2/token",
-    params,
-    {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      auth: {
-        username: env.TWITTER_CLIENT_ID,
-        password: env.TWITTER_CLIENT_SECRET,
-      },
-    }
-  );
-
-  const newAccess = resp.data.access_token;
-  const newRefresh = resp.data.refresh_token || refreshToken;
-  await saveTokens(newAccess, newRefresh, env.ENCRYPTION_KEY);
-  ACCESS_TOKEN_CACHE = newAccess;
-  return newAccess;
-}
-
-// Keep your public refresh function (used elsewhere)
-export const refreshAccessToken = async (
-  refreshToken: string
-): Promise<{ accessToken: string; refreshToken: string }> => {
-  const params = new URLSearchParams();
-  params.append("refresh_token", refreshToken);
-  params.append("grant_type", "refresh_token");
-  params.append("client_id", env.TWITTER_CLIENT_ID);
-
-  const resp = await axios.post<TwitterOAuthResponse>(
-    "https://api.twitter.com/2/oauth2/token",
-    params,
-    {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      auth: {
-        username: env.TWITTER_CLIENT_ID,
-        password: env.TWITTER_CLIENT_SECRET,
-      },
-    }
-  );
-
-  const accessToken = resp.data.access_token;
-  const newRefresh = resp.data.refresh_token || refreshToken;
-  await saveTokens(accessToken, newRefresh, env.ENCRYPTION_KEY);
-  ACCESS_TOKEN_CACHE = accessToken;
-  return { accessToken, refreshToken: newRefresh };
-};
-
-// Keep this export for compatibility (now it just returns cached/loaded token)
-export const getAccessToken = async (): Promise<string> => {
-  try {
-    const t = await ensureAccessToken();
-    return t.accessToken;
-  } catch (e) {
-    console.error("Error getting Twitter access token:", e);
-    throw new Error("Failed to get Twitter access token. Check if tokens are set up correctly.");
-  }
-};
-
-// =============== Rate-limit helpers ===============
-function resetTimestampFromHeaders(headers: Record<string, any>): number | null {
-  const reset = headers["x-rate-limit-reset"];
-  if (reset) return Number(reset) * 1000;
-
-  const retryAfter = headers["retry-after"];
-  if (retryAfter) {
-    const n = Number(retryAfter);
-    if (!Number.isNaN(n)) return Date.now() + n * 1000;
-  }
-  return null;
-}
-
-function enrichTwitterError(ax: AxiosError) {
+/**
+ * Small helper: turn axios errors into clearer messages (adds rate-limit info)
+ */
+function enrichTwitterError(err: unknown): Error {
+  const ax = err as AxiosError<any>;
   const status = ax.response?.status;
   const headers = ax.response?.headers || {};
-  const until = resetTimestampFromHeaders(headers);
+  const resetHeader = headers["x-rate-limit-reset"];
+  const resetMs = resetHeader ? Number(resetHeader) * 1000 : null;
 
-  const err = new Error(
-    (ax.response?.data as any)?.detail || ax.message || "Twitter error"
-  ) as Error & { status?: number; rateLimitedUntil?: number | null };
-
-  err.status = status;
-  if (status === 429) err.rateLimitedUntil = until;
-  return err;
+  const e = new Error(
+    ax.response?.data?.detail ||
+      ax.response?.data?.title ||
+      ax.message ||
+      "Twitter error"
+  ) as Error & { status?: number; rateResetAt?: number | null };
+  e.status = status;
+  e.rateResetAt = resetMs;
+  return e;
 }
 
-// =============== Single request wrapper ===============
-async function twitterRequest<T>(
-  req: AxiosRequestConfig,
-  opts: { retry401?: boolean; retry429?: boolean } = { retry401: true, retry429: true }
-): Promise<T> {
-  const { refreshToken } = await ensureAccessToken();
-  const token = await getAccessToken();
-
-  const doReq = async (bearer: string) =>
-    axios.request<T>({
-      ...req,
-      headers: {
-        ...(req.headers || {}),
-        Authorization: `Bearer ${bearer}`,
-      },
-    });
-
+/**
+ * Refresh Twitter access token using a refresh token.
+ */
+export async function refreshAccessToken(
+  refreshToken: string
+): Promise<{ accessToken: string; refreshToken: string }> {
   try {
-    const r = await doReq(token);
-    return r.data;
-  } catch (e: any) {
-    const ax = e as AxiosError;
-    const status = ax.response?.status;
+    const params = new URLSearchParams();
+    params.append("refresh_token", refreshToken);
+    params.append("grant_type", "refresh_token");
+    params.append("client_id", env.TWITTER_CLIENT_ID);
 
-    // 401 -> refresh once, then retry
-    if (status === 401 && opts.retry401) {
-      const fresh = await refreshAccessTokenInternal(refreshToken);
-      const r2 = await doReq(fresh);
-      return r2.data;
-    }
+    const res = await axios.post<TwitterOAuthResponse>(
+      "https://api.twitter.com/2/oauth2/token",
+      params,
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        // Many setups succeed with client_id + client_secret here.
+        // If your app is strictly PKCE-only, remove `auth` and rely on body only.
+        auth: {
+          username: env.TWITTER_CLIENT_ID,
+          password: env.TWITTER_CLIENT_SECRET,
+        },
+      }
+    );
 
-    // 429 -> wait until reset (or fallback) and retry once
-    if (status === 429 && opts.retry429) {
-      const until = resetTimestampFromHeaders(ax.response?.headers || {});
-      const waitMs = until ? Math.max(0, until - Date.now()) : 120_000;
-      console.warn(`[rate-limit] 429: backing off ${waitMs}ms (retry once)`);
-      await new Promise((r) => setTimeout(r, waitMs));
-      const r2 = await doReq(await getAccessToken());
-      return r2.data;
-    }
-
-    throw enrichTwitterError(ax);
+    return {
+      accessToken: res.data.access_token,
+      refreshToken: res.data.refresh_token || refreshToken,
+    };
+  } catch (err) {
+    throw enrichTwitterError(err);
   }
 }
 
-// =============== Twitter endpoints (use wrapper) ===============
-export const postTweet = async (
-  _accessToken: string, // kept for signature compatibility
-  message: string
-): Promise<TwitterPostResponse> => {
-  return twitterRequest<TwitterPostResponse>({
-    method: "POST",
-    url: "https://api.twitter.com/2/tweets",
-    headers: { "Content-Type": "application/json" },
-    data: { text: message },
-  });
-};
-
-export async function postReply(
-  _accessToken: string, // kept for signature compatibility
-  message: string,
-  inReplyToTweetId: string
-): Promise<TwitterPostResponse> {
-  return twitterRequest<TwitterPostResponse>({
-    method: "POST",
-    url: "https://api.twitter.com/2/tweets",
-    headers: { "Content-Type": "application/json" },
-    data: { text: message, reply: { in_reply_to_tweet_id: inReplyToTweetId } },
-  });
-}
-
-export async function replyToTweet(inReplyToTweetId: string, message: string) {
-  return postReply("", message, inReplyToTweetId);
-}
-
-export async function getSelfUserId(): Promise<string> {
-  if (SELF_USER_ID_CACHE) return SELF_USER_ID_CACHE;
-  const data = await twitterRequest<{ data: { id: string } }>({
-    method: "GET",
-    url: "https://api.twitter.com/2/users/me",
-  });
-  SELF_USER_ID_CACHE = data.data.id;
-  return SELF_USER_ID_CACHE;
-}
-
-// 👉 Backward-compat alias to satisfy old imports:
-export const getMeId = getSelfUserId;
-
-// =============== Content generation (ChainGPT) ===============
-export const getTextForTweet = async (prompt: string): Promise<string> => {
+/**
+ * Returns a valid access token; refreshes if the current one is invalid.
+ */
+export async function getAccessToken(): Promise<string> {
   try {
-    const response = await axios.post(
+    const tokens = await loadTokens(env.ENCRYPTION_KEY);
+
+    // quick probe to see if current access token is alive
+    try {
+      await axios.get("https://api.twitter.com/2/users/me", {
+        headers: { Authorization: `Bearer ${tokens.accessToken}` },
+      });
+      return tokens.accessToken;
+    } catch {
+      // refresh flow
+      const newTokens = await refreshAccessToken(tokens.refreshToken);
+      await saveTokens(
+        newTokens.accessToken,
+        newTokens.refreshToken,
+        env.ENCRYPTION_KEY
+      );
+      return newTokens.accessToken;
+    }
+  } catch (err) {
+    // surface a consistent message upwards
+    const e = enrichTwitterError(err);
+    console.error("Error getting Twitter access token:", e);
+    throw new Error(
+      "Failed to get Twitter access token. Check if tokens are set up correctly."
+    );
+  }
+}
+
+/**
+ * Generate tweet text using ChainGPT (trimmed to fit basic Tweet length).
+ */
+export async function getTextForTweet(prompt: string): Promise<string> {
+  try {
+    const res = await axios.post(
       `${CHAINGPT_API_URL}/tweet-generator`,
       { prompt },
       {
@@ -210,29 +113,140 @@ export const getTextForTweet = async (prompt: string): Promise<string> => {
         },
       }
     );
-    const text = (response.data?.tweet || "").toString();
+
+    // If your app uses native X API (no media), keeping under ~270 is safe.
+    const text: string = res.data?.tweet ?? "";
     return text.slice(0, 270);
-  } catch (error) {
-    console.error("Error generating tweet text:", error);
+  } catch (err) {
+    console.error("Error generating tweet text:", err);
     throw new Error("Failed to generate tweet content using ChainGPT API");
   }
-};
-
-// Free-form for mentions (kept for compatibility)
-export async function generateFreeformReply(prompt: string): Promise<string> {
-  return getTextForTweet(prompt);
 }
 
-// =============== High-level helpers for your jobs ===============
-export const generateAndPostTweet = async (
-  prompt: string
-): Promise<{ response: TwitterPostResponse; tweet: string }> => {
-  const tweet = await getTextForTweet(prompt);
-  const response = await postTweet("", tweet);
-  console.log(`Tweet posted successfully: ${tweet}`);
-  return { response, tweet };
-};
+/**
+ * Low-level: post a tweet with a given access token.
+ */
+export async function postTweet(
+  accessToken: string,
+  message: string
+): Promise<TwitterPostResponse> {
+  try {
+    const res = await axios.post<TwitterPostResponse>(
+      "https://api.twitter.com/2/tweets",
+      { text: message },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    return res.data;
+  } catch (err) {
+    throw enrichTwitterError(err);
+  }
+}
 
-export const uploadTwitterPostTweet = async (message: string): Promise<TwitterPostResponse> => {
-  return postTweet("", message);
-};
+/**
+ * Low-level: reply to an existing tweetId (requires access token).
+ */
+export async function postReply(
+  accessToken: string,
+  message: string,
+  inReplyToTweetId: string
+): Promise<TwitterPostResponse> {
+  try {
+    const res = await axios.post<TwitterPostResponse>(
+      "https://api.twitter.com/2/tweets",
+      {
+        text: message,
+        reply: { in_reply_to_tweet_id: inReplyToTweetId },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    return res.data;
+  } catch (err) {
+    throw enrichTwitterError(err);
+  }
+}
+
+/**
+ * Convenience: generate text, then post it.
+ */
+export async function generateAndPostTweet(
+  prompt: string
+): Promise<{ response: TwitterPostResponse; tweet: string }> {
+  const tweet = await getTextForTweet(prompt);
+  const accessToken = await getAccessToken();
+
+  try {
+    const response = await postTweet(accessToken, tweet);
+    console.log(`Tweet posted successfully: ${tweet}`);
+    return { response, tweet };
+  } catch (err) {
+    const e = enrichTwitterError(err);
+    console.error("Error generating and posting tweet:", e);
+    throw e;
+  }
+}
+
+/**
+ * Convenience: post a tweet (no need to pass token).
+ */
+export async function uploadTwitterPostTweet(
+  message: string
+): Promise<TwitterPostResponse> {
+  const token = await getAccessToken();
+  try {
+    const res = await postTweet(token, message);
+    console.log(`Tweet posted successfully: ${message}`);
+    return res;
+  } catch (err) {
+    const e = enrichTwitterError(err);
+    console.error("Error posting tweet:", e);
+    throw e;
+  }
+}
+
+/**
+ * Compatibility export: some modules may import this older name.
+ * Supports both signatures:
+ *   postTweetReply(accessToken, message, inReplyTo)
+ *   postTweetReply(inReplyTo, message)
+ */
+export function postTweetReply(
+  a: string,
+  b: string,
+  c?: string
+): Promise<TwitterPostResponse> {
+  if (c) {
+    // old signature: (accessToken, message, inReplyTo)
+    return postReply(a, b, c);
+  }
+  // alt signature: (inReplyTo, message)
+  return (async () => {
+    const token = await getAccessToken();
+    return postReply(token, b, a);
+  })();
+}
+
+/**
+ * Fetch the authenticated user's id (handy for mentions/replies code).
+ */
+export async function getSelfUserId(): Promise<string> {
+  const token = await getAccessToken();
+  const res = await axios.get("https://api.twitter.com/2/users/me", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const id = res.data?.data?.id;
+  if (!id) throw new Error("Failed to resolve self user id");
+  return id;
+}
+
+// some codebases import getMeId; keep an alias for compatibility
+export const getMeId = getSelfUserId;
