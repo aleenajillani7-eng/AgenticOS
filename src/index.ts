@@ -7,7 +7,6 @@ import { prettyJSON } from "hono/pretty-json";
 import { env } from "./config/env";
 import { apiRouter, viewRouter } from "./routes";
 import { scheduleTweets } from "./jobs/tweet.job";
-import { startMentionsJob } from "./jobs/mentions.job";
 
 import { existsSync } from "fs";
 import { loadTokens, TOKENS_FILE_PATH } from "./utils/encryption";
@@ -41,16 +40,13 @@ const port = Number(env.PORT) || 3000;
 Bun.serve({ fetch: app.fetch, port });
 console.log(`🚀 Twitter AI Agent listening on port ${port}`);
 
-// Start background jobs ONLY if tokens exist and decrypt successfully
+// Start scheduler ONLY if tokens exist and decrypt successfully
 (async () => {
   try {
     if (existsSync(TOKENS_FILE_PATH)) {
       await loadTokens(process.env.ENCRYPTION_KEY || "");
-      // Scheduled tweets
       scheduleTweets();
       console.log("[scheduler] Started");
-      // Mentions poller (TL;DRabbit replies)
-      startMentionsJob();
     } else {
       console.warn(`[scheduler] Skipped: tokens not found at ${TOKENS_FILE_PATH}`);
     }
