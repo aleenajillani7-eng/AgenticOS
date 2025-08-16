@@ -13,10 +13,10 @@ export const TOKENS_FILE_PATH = join(DATA_DIR, "tokens.json");
 type EncryptedBlobV2 = {
   version: 2;
   kdf: "PBKDF2-SHA256";
-  rounds: number; // 100_000
-  salt: string;   // base64
-  iv: string;     // base64 (12 bytes)
-  ciphertext: string; // base64
+  rounds: number;        // 100_000
+  salt: string;          // base64
+  iv: string;            // base64 (12 bytes)
+  ciphertext: string;    // base64
   createdAt: number;
 };
 
@@ -55,8 +55,10 @@ export async function saveTokens(
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveKey(passphrase, salt);
 
-  const plaintext = toBytes(JSON.stringify({ accessToken, refreshToken } satisfies TwitterTokens));
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext));
+  const plaintext = toBytes(JSON.stringify({ accessToken, refreshToken } as TwitterTokens));
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext)
+  );
 
   const blob: EncryptedBlobV2 = {
     version: 2,
@@ -65,7 +67,7 @@ export async function saveTokens(
     salt: b64e(salt),
     iv: b64e(iv),
     ciphertext: b64e(ciphertext),
-    createdAt: Date.now()
+    createdAt: Date.now(),
   };
 
   writeFileSync(TOKENS_FILE_PATH, JSON.stringify(blob, null, 2));
@@ -78,7 +80,8 @@ export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
   if (!existsSync(TOKENS_FILE_PATH)) {
     console.error(`[tokens] Not found at ${TOKENS_FILE_PATH}`);
     throw new Error("Twitter tokens file not found. Please set up tokens first.");
-    }
+  }
+
   const raw = readFileSync(TOKENS_FILE_PATH, "utf8");
 
   try {
@@ -99,16 +102,14 @@ export async function loadTokens(passphrase: string): Promise<TwitterTokens> {
           throw new Error("Decrypted content missing tokens");
         }
         return obj as TwitterTokens;
-      } catch (e) {
-        // Map WebCrypto DOMException → friendly error
+      } catch {
         throw new Error(
-          "Decryption failed (likely wrong ENCRYPTION_KEY or corrupted tokens file). " +
-          "Reset tokens and re-authorize."
+          "Decryption failed (likely wrong ENCRYPTION_KEY or corrupted tokens file). Reset tokens and re-authorize."
         );
       }
     }
 
-    // Legacy plaintext (fallback): allow migration once
+    // Legacy plaintext fallback (allow one-time migration if present)
     if (parsed?.accessToken && parsed?.refreshToken) {
       return parsed as TwitterTokens;
     }
@@ -136,4 +137,9 @@ export function deleteTokensFile(): boolean {
     console.error("[tokens] delete error:", e);
     return false;
   }
+}
+
+/** ✅ Back-compat alias for older imports */
+export function tokenAlreadyExists(): boolean {
+  return tokensFileExists();
 }
