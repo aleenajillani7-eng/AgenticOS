@@ -1,101 +1,65 @@
 // src/routes/auth.route.ts
 import { Hono } from "hono";
-import { existsSync, writeFileSync, unlinkSync } from "fs";
-import { join, dirname } from "path";
-
 import { getAuthUrl, handleCallback } from "../services/auth.service";
-import { TOKENS_FILE_PATH, loadTokens } from "../utils/encryption";
-import { scheduleTweets } from "../jobs/tweet.job";
-import { startMentionsJob } from "../jobs/mentions.job";
+import { env } from "../config/env";
+import {
+  saveTokens,
+  loadTokens,
+  TOKENS_FILE_PATH,
+  tokensFileExists,
+  deleteTokensFile,
+} from "../utils/encryption";
 
 export const authRouter = new Hono();
 
-// Start OAuth (+ alias)
+// Kick off OAuth
 authRouter.get("/", (c) => c.redirect(getAuthUrl()));
-authRouter.get("/login", (c) => c.redirect(getAuthUrl()));
 
-// Callback: save tokens, verify, then start background jobs
+// OAuth callback: save tokens only, don't decrypt here
 authRouter.get("/callback", async (c) => {
   try {
     const url = new URL(c.req.url);
     const code = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
-    if (!code || !state) return c.json({ success: false, error: "Missing OAuth code/state" }, 400);
+    if (!code) return c.json({ success: false, error: "Missing OAuth code" }, 400);
 
-    await handleCallback(code, state);
+    const t = await handleCallback(code);
+    // Save with your passphrase; do not verify here
+    await saveTokens(t.access_token, t.refresh_token, env.ENCRYPTION_KEY);
+    console.log("[auth] Tokens saved to", TOKENS_FILE_PATH);
 
-    // verify decryption with the current key
-    await loadTokens(process.env.ENCRYPTION_KEY || "");
-
-    // start (or re-start) jobs now that tokens exist
-    try {
-      scheduleTweets();          // idempotent in our job impl (stops then sets up)
-      console.log("[scheduler] Started after auth");
-    } catch (e) {
-      console.error("[scheduler] Failed to start after auth:", e);
-    }
-
-    try {
-      startMentionsJob();        // idempotent; no-op if already running
-      console.log("[mentions] Job started after auth");
-    } catch (e) {
-      console.error("[mentions] Failed to start after auth:", e);
-    }
-
-    return c.json({ success: true, message: "Bot is now authorized to reply to mentions 🚀" });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Auth failed (unknown error)";
-    console.error("Auth callback error:", err);
+    // Return success; you can verify via /api/auth/probe
+    return c.json({
+      success: true,
+      message: "Bot authorized. Use /api/auth/probe to verify decryption.",
+      path: TOKENS_FILE_PATH,
+    });
+  } catch (err: any) {
+    const message = err?.message || "Auth callback failed";
+    console.error("[auth] callback error:", err);
     return c.json({ success: false, error: message }, 500);
   }
 });
 
-// Diagnostics
-authRouter.get("/status", (c) => {
-  const present = existsSync(TOKENS_FILE_PATH);
-  return c.json({ tokensPresent: present, path: TOKENS_FILE_PATH });
-});
+// Is there a tokens file?
+authRouter.get("/status", (c) =>
+  c.json({ tokensPresent: tokensFileExists(), path: TOKENS_FILE_PATH })
+);
 
+// Try decrypting with current ENCRYPTION_KEY
 authRouter.get("/probe", async (c) => {
   try {
-    const key = process.env.ENCRYPTION_KEY || "";
-    await loadTokens(key);
+    await loadTokens(env.ENCRYPTION_KEY);
     return c.json({ ok: true, canDecrypt: true, path: TOKENS_FILE_PATH });
-  } catch (e: any) {
-    return c.json({ ok: false, canDecrypt: false, error: e?.message || "decrypt failed", path: TOKENS_FILE_PATH }, 500);
+  } catch (err: any) {
+    return c.json(
+      { ok: false, canDecrypt: false, error: err?.message || String(err), path: TOKENS_FILE_PATH },
+      500
+    );
   }
 });
 
-authRouter.get("/debug", (c) => {
-  const dir = dirname(TOKENS_FILE_PATH);
-  let canWrite = false;
-  try {
-    const testFile = join(dir, "._write_test.tmp");
-    writeFileSync(testFile, "ok");
-    unlinkSync(testFile);
-    canWrite = true;
-  } catch {}
-  const keyLen = (process.env.ENCRYPTION_KEY || "").length;
-  return c.json({
-    path: TOKENS_FILE_PATH,
-    dir,
-    dirWritable: canWrite,
-    encryptionKeySet: keyLen > 0,
-    encryptionKeyLen: keyLen,
-  });
-});
-
-// Reset tokens (danger)
+// Remove tokens to re-auth cleanly
 authRouter.get("/reset", (c) => {
-  const url = new URL(c.req.url);
-  const confirm = url.searchParams.get("confirm");
-  if (confirm !== "DELETE") {
-    return c.json({ ok: false, error: "Add ?confirm=DELETE to reset tokens (destructive)" }, 400);
-  }
-  try {
-    if (existsSync(TOKENS_FILE_PATH)) unlinkSync(TOKENS_FILE_PATH);
-    return c.json({ ok: true, reset: true, path: TOKENS_FILE_PATH });
-  } catch (e: any) {
-    return c.json({ ok: false, reset: false, error: e?.message || "failed to delete" }, 500);
-  }
+  const deleted = deleteTokensFile();
+  return c.json({ success: true, deleted, path: TOKENS_FILE_PATH });
 });
