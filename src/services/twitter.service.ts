@@ -84,11 +84,9 @@ export const getAccessToken = async (): Promise<string> => {
 
 // =============== Rate-limit helpers ===============
 function resetTimestampFromHeaders(headers: Record<string, any>): number | null {
-  // x-rate-limit-reset is epoch seconds
   const reset = headers["x-rate-limit-reset"];
   if (reset) return Number(reset) * 1000;
 
-  // retry-after is seconds to wait
   const retryAfter = headers["retry-after"];
   if (retryAfter) {
     const n = Number(retryAfter);
@@ -145,7 +143,7 @@ async function twitterRequest<T>(
     // 429 -> wait until reset (or fallback) and retry once
     if (status === 429 && opts.retry429) {
       const until = resetTimestampFromHeaders(ax.response?.headers || {});
-      const waitMs = until ? Math.max(0, until - Date.now()) : 120_000; // default 2min
+      const waitMs = until ? Math.max(0, until - Date.now()) : 120_000;
       console.warn(`[rate-limit] 429: backing off ${waitMs}ms (retry once)`);
       await new Promise((r) => setTimeout(r, waitMs));
       const r2 = await doReq(await getAccessToken());
@@ -195,6 +193,9 @@ export async function getSelfUserId(): Promise<string> {
   SELF_USER_ID_CACHE = data.data.id;
   return SELF_USER_ID_CACHE;
 }
+
+// 👉 Backward-compat alias to satisfy old imports:
+export const getMeId = getSelfUserId;
 
 // =============== Content generation (ChainGPT) ===============
 export const getTextForTweet = async (prompt: string): Promise<string> => {
