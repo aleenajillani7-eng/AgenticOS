@@ -2,13 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title><%= title %> | Dashboard</title>
   <link rel="stylesheet" href="/style.css" />
-  <link
-    rel="stylesheet"
-    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
-  />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"/>
 </head>
 <body class="bg-gray-50 flex min-h-screen">
   <!-- Sidebar -->
@@ -19,7 +16,6 @@
     </div>
     <nav class="mt-6">
       <ul class="space-y-2 px-4">
-        <!-- Scheduler -->
         <li>
           <a href="/dashboard"
              class="flex items-center px-4 py-3 text-gray-100 hover:bg-blue-700 rounded-lg transition-colors duration-200 <%= path === '/dashboard' ? 'bg-blue-700' : '' %>">
@@ -27,8 +23,6 @@
             <span class="ml-3">Scheduler</span>
           </a>
         </li>
-
-        <!-- Live News -->
         <li>
           <a href="/dashboard/live-news"
              class="flex items-center px-4 py-3 text-gray-100 hover:bg-blue-700 rounded-lg transition-colors duration-200 <%= path === '/dashboard/live-news' ? 'bg-blue-700' : '' %>">
@@ -36,17 +30,6 @@
             <span class="ml-3">Live News</span>
           </a>
         </li>
-
-        <!-- Mentions -->
-        <li>
-          <a href="/dashboard/mentions"
-             class="flex items-center px-4 py-3 text-gray-100 hover:bg-blue-700 rounded-lg transition-colors duration-200 <%= path === '/dashboard/mentions' ? 'bg-blue-700' : '' %>">
-            <i class="fas fa-at w-5"></i>
-            <span class="ml-3">Mentions</span>
-          </a>
-        </li>
-
-        <!-- Refresh Token (Twitter OAuth) -->
         <li>
           <a href="/api/auth"
              class="flex items-center px-4 py-3 text-gray-100 hover:bg-blue-700 rounded-lg transition-colors duration-200">
@@ -60,12 +43,14 @@
 
   <!-- Main Content -->
   <div class="flex-1">
+    <!-- Top Navigation Bar -->
     <header class="bg-white shadow-sm">
       <div class="flex items-center justify-between px-8 py-4">
         <img src="/images/logo.svg" alt="ChainGPT" class="w-[10rem]">
       </div>
     </header>
 
+    <!-- Page Content -->
     <main class="p-8 bg-gray-50">
       <%- body %>
     </main>
