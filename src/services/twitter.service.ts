@@ -4,9 +4,12 @@ import { env } from "../config/env";
 import { loadTokens, saveTokens } from "../utils/encryption";
 import { TwitterOAuthResponse, TwitterPostResponse } from "../types";
 
-// Kept for scheduled posts
+// ChainGPT (kept for scheduler text generation)
 const CHAINGPT_API_URL = "https://webapi.chaingpt.org";
 
+// ----------------------------
+// Token normalization helpers
+// ----------------------------
 type StoredTokens = {
   access_token?: string;
   accessToken?: string;
@@ -36,12 +39,14 @@ function isExpired(t: StoredTokens, skewSeconds = 120): boolean {
   return nowSec >= Math.floor(created / 1000) + ttl - skewSeconds;
 }
 
-// ---- Backoff helpers ----
-async function sleep(ms: number) {
+// ----------------------------
+// Sleep + backoff helpers
+// ----------------------------
+function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 function jitter(ms: number) {
-  const j = Math.floor(Math.random() * 2000); // add up to 2s jitter
+  const j = Math.floor(Math.random() * 2000); // up to 2s jitter
   return ms + j;
 }
 function computeBackoffMsFromHeaders(headers: any): number {
@@ -53,38 +58,39 @@ function computeBackoffMsFromHeaders(headers: any): number {
   if (reset) {
     const now = Date.now();
     const resetMs = Number(reset) * 1000;
-    const wait = resetMs - now + 500; // add small cushion
+    const wait = resetMs - now + 500; // tiny cushion
     if (wait > 0) return jitter(wait);
   }
   return jitter(60_000); // safe default 60s
 }
 
-// ---- Request wrapper with 429 backoff & limited retries ----
-async function requestWithRetry<T>(
-  cfg: AxiosRequestConfig,
-  retries = 2
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      const res = await axios<T>(cfg);
-      return res.data;
-    } catch (err) {
-      const ax = err as AxiosError;
-      const status = ax.response?.status;
-      if (status === 429 && attempt < retries) {
-        const waitMs = computeBackoffMsFromHeaders(ax.response?.headers || {});
-        console.warn(`[rate-limit] 429: backing off ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
-        await sleep(waitMs);
-        attempt++;
-        continue;
-      }
-      throw err;
-    }
+// ----------------------------
+// Global pacing state
+// ----------------------------
+let lastPostAt = 0;                 // last successful POST /2/tweets time
+let rateLimitedUntil: number | null = null; // if set, don't post until this time
+
+async function ensurePacing() {
+  const minGapMs = 120_000; // 2 minutes minimum gap between tweet posts
+  const now = Date.now();
+
+  if (rateLimitedUntil && now < rateLimitedUntil) {
+    const wait = rateLimitedUntil - now;
+    console.warn(`[rate-limit] sleeping until ${new Date(rateLimitedUntil).toISOString()} (${wait}ms)`);
+    await sleep(wait);
+  }
+
+  const gap = now - lastPostAt;
+  if (gap < minGapMs) {
+    const wait = minGapMs - gap;
+    console.warn(`[pacing] enforcing min gap: waiting ${wait}ms`);
+    await sleep(wait);
   }
 }
 
-// ---- OAuth refresh (only when needed) ----
+// ----------------------------
+// OAuth refresh (only if needed)
+// ----------------------------
 export const refreshAccessToken = async (
   refreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string; expiresIn?: number }> => {
@@ -133,11 +139,41 @@ export const getAccessToken = async (): Promise<string> => {
   return refreshed.accessToken;
 };
 
-// ---- Authed request with refresh-on-401 and 429 backoff ----
-async function authedRequest<T>(
-  cfg: AxiosRequestConfig,
-  doRefreshOn401 = true
-): Promise<T> {
+// ----------------------------
+// 429-aware request wrapper
+// ----------------------------
+async function requestWithRetry<T>(cfg: AxiosRequestConfig, retries = 2): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      const res = await axios<T>(cfg);
+      return res.data;
+    } catch (err) {
+      const ax = err as AxiosError;
+      const status = ax.response?.status;
+
+      if (status === 429) {
+        const waitMs = computeBackoffMsFromHeaders(ax.response?.headers || {});
+        // remember a global "do not post until" so scheduler batches don't pile up
+        rateLimitedUntil = Date.now() + waitMs;
+        console.warn(`[rate-limit] 429: backing off ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
+
+        if (attempt < retries) {
+          await sleep(waitMs);
+          attempt++;
+          continue;
+        }
+      }
+      // other errors or retries exhausted
+      throw err;
+    }
+  }
+}
+
+// ----------------------------
+// Authed request (adds bearer)
+// ----------------------------
+async function authedRequest<T>(cfg: AxiosRequestConfig, doRefreshOn401 = true): Promise<T> {
   try {
     const token = await getAccessToken();
     const merged: AxiosRequestConfig = {
@@ -151,6 +187,7 @@ async function authedRequest<T>(
   } catch (err) {
     const ax = err as AxiosError;
     if (ax.response?.status === 401 && doRefreshOn401) {
+      // try once to refresh then retry
       const raw = await loadTokens(env.ENCRYPTION_KEY);
       const t = normalize(raw);
       if (!t.refresh_token) throw err;
@@ -180,7 +217,9 @@ async function authedRequest<T>(
   }
 }
 
-// ---- ChainGPT text (kept for scheduler) ----
+// ----------------------------
+// ChainGPT text (kept for scheduler)
+// ----------------------------
 export const getTextForTweet = async (prompt: string): Promise<string> => {
   const response = await axios.post(
     `${CHAINGPT_API_URL}/tweet-generator`,
@@ -195,88 +234,46 @@ export const getTextForTweet = async (prompt: string): Promise<string> => {
   return String(response.data.tweet || "").slice(0, 270);
 };
 
-// ---- Tweet helpers ----
+// ----------------------------
+// Tweet helpers (pacing-aware)
+// ----------------------------
 export const postTweet = async (
   accessToken: string,
   message: string
 ): Promise<TwitterPostResponse> => {
+  await ensurePacing();
+
   const cfg: AxiosRequestConfig = {
     method: "POST",
     url: "https://api.twitter.com/2/tweets",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
     data: { text: message },
   };
-  return requestWithRetry<TwitterPostResponse>(cfg);
+  const data = await requestWithRetry<TwitterPostResponse>(cfg);
+  lastPostAt = Date.now();
+  return data;
 };
 
 export const postReply = async (
   message: string,
   inReplyToTweetId: string
 ): Promise<TwitterPostResponse> => {
+  await ensurePacing();
+
   const cfg: AxiosRequestConfig = {
     method: "POST",
     url: "https://api.twitter.com/2/tweets",
     headers: { "Content-Type": "application/json" },
     data: { text: message, reply: { in_reply_to_tweet_id: inReplyToTweetId } },
   };
-  return authedRequest<TwitterPostResponse>(cfg);
+  const data = await authedRequest<TwitterPostResponse>(cfg);
+  lastPostAt = Date.now();
+  return data;
 };
 
-// Cache self user id (or read from ENV to avoid /users/me)
-let cachedSelf: { id: string; fetchedAt: number } | null = null;
-
-export const getSelfUserId = async (): Promise<string> => {
-  // If you know your account id, set TWITTER_USER_ID to skip /users/me entirely
-  if (env.TWITTER_USER_ID) return env.TWITTER_USER_ID;
-
-  if (cachedSelf && Date.now() - cachedSelf.fetchedAt < 60 * 60 * 1000) {
-    return cachedSelf.id;
-  }
-  const data = await authedRequest<{ data: { id: string } }>({
-    method: "GET",
-    url: "https://api.twitter.com/2/users/me",
-  });
-  cachedSelf = { id: data.data.id, fetchedAt: Date.now() };
-  return data.data.id;
-};
-
-// Mentions fetch with pagination (catches up >20 items)
-export const fetchMentions = async (
-  userId: string,
-  sinceId?: string
-): Promise<Array<{ id: string; text: string; author_id: string; created_at?: string }>> => {
-  const out: Array<{ id: string; text: string; author_id: string; created_at?: string }> = [];
-  let pageToken: string | undefined;
-  let pages = 0;
-  const MAX_PAGES = 5;    // ~100 tweets max (5 * 20)
-  const PAGE_SIZE = 20;   // Twitter cap per page
-
-  while (pages < MAX_PAGES) {
-    const url = new URL(`https://api.twitter.com/2/users/${userId}/mentions`);
-    url.searchParams.set("max_results", String(PAGE_SIZE));
-    url.searchParams.set("tweet.fields", "author_id,created_at");
-    if (sinceId) url.searchParams.set("since_id", sinceId);
-    if (pageToken) url.searchParams.set("pagination_token", pageToken);
-
-    const data = await authedRequest<{ data?: any[]; meta?: { next_token?: string } }>({
-      method: "GET",
-      url: url.toString(),
-    });
-
-    const items = (data.data || []) as Array<{ id: string; text: string; author_id: string; created_at?: string }>;
-    out.push(...items);
-
-    pageToken = data.meta?.next_token;
-    pages++;
-    if (!pageToken || items.length < PAGE_SIZE) break;
-  }
-
-  // oldest first for polite processing
-  out.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
-  return out;
-};
-
-// For scheduler
+// ----------------------------
+// Public functions used elsewhere
+// ----------------------------
 export const generateAndPostTweet = async (
   prompt: string
 ): Promise<{ response: TwitterPostResponse; tweet: string }> => {
@@ -293,7 +290,3 @@ export const uploadTwitterPostTweet = async (message: string): Promise<TwitterPo
   console.log(`Tweet posted successfully: ${message}`);
   return response;
 };
-
-// ---- Compatibility aliases (avoid import errors in other files) ----
-export const postTweetReply = postReply;
-export const getMeId = getSelfUserId;
